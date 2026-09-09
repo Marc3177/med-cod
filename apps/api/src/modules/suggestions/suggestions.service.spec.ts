@@ -97,6 +97,48 @@ describe("SuggestionsService", () => {
     }
   );
 
+  it("resolves matchType 'prefix' CM index entries to real billable codes instead of silently dropping them (regression: TEST_REPORT 'Short-word specificity loss')", async () => {
+    const encounterId = await seed([{ type: "DISCHARGE_SUMMARY", content: "Abrasion noted on the right ankle." }]);
+
+    const suggestions = await service.listSuggestions(encounterId, TEST_FACILITY_ID);
+
+    // "Abrasion, ankle" -> S90.51 is matchType "prefix" (a code stem
+    // needing a 7th-character encounter-type extension) with no separate
+    // matchType "code" entry pointing at the same code — the ONLY route to
+    // a real billable code here is the prefix-expansion fix. S9051 itself
+    // is a non-billable header; the real leaf codes all start with it.
+    expect(suggestions.some((s) => s.code.startsWith("S9051"))).toBe(true);
+  });
+
+  it("does not let a dropped short word (e.g. 'arm') collapse an entry to a single overly-generic word, flooding results with unrelated codes (regression: TEST_REPORT 'Short-word specificity loss')", async () => {
+    const encounterId = await seed([
+      { type: "DISCHARGE_SUMMARY", content: "Creatinine rising, consistent with acute kidney injury." },
+    ]);
+
+    const suggestions = await service.listSuggestions(encounterId, TEST_FACILITY_ID);
+
+    // "Injury, arm" collapses to requiring only "injury" once "arm" (3
+    // characters) is silently dropped — before the hidden-short-word fix,
+    // this alone matched a kidney-injury sentence and, combined with the
+    // matchType "prefix" fix, expanded into ~20 unrelated arm-injury codes
+    // that filled the MAX_SUGGESTIONS cap and pushed N179 out entirely.
+    expect(suggestions.some((s) => s.code.startsWith("S49"))).toBe(false);
+    expect(suggestions.length).toBeLessThan(25);
+  });
+
+  it("does not let a dropped short anatomical word (e.g. 'lip') cause an unrelated match (regression: TEST_REPORT 'Short-word specificity loss')", async () => {
+    const encounterId = await seed([
+      { type: "DISCHARGE_SUMMARY", content: "Right lower extremity cellulitis noted on exam." },
+    ]);
+
+    const suggestions = await service.listSuggestions(encounterId, TEST_FACILITY_ID);
+
+    // K13.0 is "Cellulitis, lip" — the entry collapses to just "cellulitis"
+    // once "lip" is dropped, which would otherwise match any cellulitis
+    // mention regardless of site.
+    expect(suggestions.map((s) => s.code)).not.toContain("K130");
+  });
+
   it("does NOT relax the ulcer/ulcerated/ulcerating/ulceration/ulcerative cluster — deliberately excluded because it collapses short-anatomical-word entries to false positives (regression: TEST_REPORT 'Synonym clusters')", async () => {
     const encounterId = await seed([
       { type: "DISCHARGE_SUMMARY", content: "Stage 2 pressure ulcer noted on the sacrum." },

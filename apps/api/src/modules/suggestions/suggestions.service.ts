@@ -8,6 +8,7 @@ const MIN_SIGNIFICANT_WORD_LENGTH = 4;
 const MIN_DISTINCTIVE_WORD_LENGTH = 6;
 const MAX_SUGGESTIONS = 30;
 const MAX_EVIDENCE_ITEMS = 200;
+const MAX_PREFIX_EXPANSION = 20;
 
 export type CodeSuggestion = {
   codeSystem: "ICD-10-CM" | "ICD-10-PCS";
@@ -158,14 +159,27 @@ export class SuggestionsService {
     // any sentence (this caught a real false positive during testing:
     // "right" alone matched "Ear, wax, right" against an unrelated
     // sentence).
-    const cmEntryWords = cmEntries.map((entry) => ({ entry, groups: significantWordGroups(entry.term) })).filter((e) => isDistinctiveEnough(e.groups));
-    const pcsEntryWords = pcsEntries.map((entry) => ({ entry, groups: significantWordGroups(entry.term) })).filter((e) => isDistinctiveEnough(e.groups));
+    const cmEntryWords = cmEntries
+      .map((entry) => ({ entry, groups: significantWordGroups(entry.term) }))
+      .filter((e) => isDistinctiveEnough(e.groups, hasHiddenShortWord(e.entry.term, e.groups)));
+    const pcsEntryWords = pcsEntries
+      .map((entry) => ({ entry, groups: significantWordGroups(entry.term) }))
+      .filter((e) => isDistinctiveEnough(e.groups, hasHiddenShortWord(e.entry.term, e.groups)));
 
     // A code can match many sentences now (no early "already seen, skip"
     // exit), so its reference-table row is cached the first time it's
     // looked up rather than re-queried on every subsequent match.
     const cmCodeCache = new Map<string, { code: string; longDescription: string; isBillable: boolean } | null>();
     const pcsCodeCache = new Map<string, { code: string; description: string; isBillable: boolean } | null>();
+    // matchType 'prefix' entries (11% of the whole CM index — see
+    // docs/TEST_REPORT.md "Synonym clusters") give a code STEM requiring
+    // more characters (e.g. "S4081" needs a 7th-character encounter-type
+    // extension), not a single valid code. Resolved by expanding to the
+    // real billable codes under that stem, same pattern already proven in
+    // EncoderService.searchIcd10Cm() for the identical problem — this
+    // service just never had it applied. Cached per stem since many
+    // sentences can hit the same prefix entry.
+    const cmPrefixCache = new Map<string, { code: string; longDescription: string; isBillable: boolean }[]>();
 
     const evidence: EvidenceItem[] = [];
 
@@ -184,6 +198,30 @@ export class SuggestionsService {
       for (const { entry, groups } of cmEntryWords) {
         if (evidence.length >= MAX_EVIDENCE_ITEMS) break;
         if (groups.length === 0 || !groupsSatisfied(groups, sentenceWords)) continue;
+
+        if (entry.matchType === "prefix") {
+          if (!cmPrefixCache.has(entry.codeValue)) {
+            const expansions = await this.referencePrisma.icd10CmCode.findMany({
+              where: { fiscalYear: CURRENT_FISCAL_YEAR, isBillable: true, code: { startsWith: entry.codeValue } },
+              take: MAX_PREFIX_EXPANSION,
+            });
+            cmPrefixCache.set(entry.codeValue, expansions);
+          }
+          for (const code of cmPrefixCache.get(entry.codeValue)!) {
+            if (evidence.length >= MAX_EVIDENCE_ITEMS) break;
+            evidence.push({
+              codeSystem: "ICD-10-CM",
+              code: code.code,
+              description: code.longDescription,
+              isBillable: code.isBillable,
+              evidenceExcerpt: sentence,
+              documentId,
+              documentType,
+              matchedVia: entry.term,
+            });
+          }
+          continue;
+        }
 
         if (!cmCodeCache.has(entry.codeValue)) {
           const found = await this.referencePrisma.icd10CmCode.findUnique({
@@ -363,8 +401,45 @@ const SYNONYM_CLUSTERS: string[][] = [
   ["failure", "failed"],
 ];
 
-function isDistinctiveEnough(groups: string[][]): boolean {
+/**
+ * Pure noise — CMS index abbreviations and English connectors/articles
+ * that never carry clinical meaning on their own, regardless of context.
+ * Distinct from real short anatomical/clinical words (arm, leg, hip, lip,
+ * gum, ear, HIV...) which MIN_SIGNIFICANT_WORD_LENGTH also drops but which
+ * DO carry real meaning — see hasHiddenShortWord() below, which is what
+ * actually protects against those.
+ */
+const KNOWN_STOPWORDS = new Set([
+  "nec", "nos", "or", "to", "due", "of", "in", "by", "and", "not", "as", "on",
+  "for", "non", "pre", "at", "the", "out", "use", "a", "i", "s",
+]);
+
+/**
+ * True when the term's ORIGINAL text (before any filtering) contained a
+ * real, non-stopword word shorter than MIN_SIGNIFICANT_WORD_LENGTH that
+ * isn't already captured in `groups` — i.e. specificity was silently lost.
+ * Found via a systematic short-word investigation (see docs/TEST_REPORT.md
+ * "Short-word specificity loss"): "Injury, arm" reduces to the single
+ * word "injury" once "arm" (3 characters) is dropped, and requiring only
+ * "injury" is far too broad — it matched an "acute kidney injury" sentence
+ * that has nothing to do with an arm. Whether this actually causes a
+ * problem depends entirely on whether OTHER real content survived
+ * alongside the dropped word: an entry with 2+ groups already requires
+ * enough else that losing one short qualifier is low-risk (unaffected by
+ * this check); this only tightens the risky case where a single long word
+ * would otherwise stand in — via isDistinctiveEnough's fallback branch —
+ * for what used to be a two-part requirement.
+ */
+function hasHiddenShortWord(term: string, groups: string[][]): boolean {
+  const kept = new Set(groups.flat());
+  return tokenizeWords(term.toLowerCase()).some(
+    (w) => w.length > 0 && w.length < MIN_SIGNIFICANT_WORD_LENGTH && !KNOWN_STOPWORDS.has(w) && !kept.has(w)
+  );
+}
+
+function isDistinctiveEnough(groups: string[][], hiddenShortWord: boolean): boolean {
   if (groups.length >= 2) return true;
+  if (hiddenShortWord) return false;
   return groups.some((group) => group.some((w) => w.length >= MIN_DISTINCTIVE_WORD_LENGTH));
 }
 
