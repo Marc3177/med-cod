@@ -156,6 +156,45 @@ describe("CodingService", () => {
     });
   });
 
+  describe("saveDraft — locked-encounter guard (regression: found investigating the QA lifecycle)", () => {
+    it("rejects saveDraft() on an encounter that is FINALIZED", async () => {
+      const encounterId = await seed();
+      await service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, decision(encounterId));
+      await service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID);
+      // finalize() may itself randomly sample into QA_REVIEW — force back
+      // to FINALIZED so this test isolates that specific status, not both.
+      await appPrisma.encounter.update({ where: { id: encounterId }, data: { status: "FINALIZED" } });
+
+      await expect(
+        service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, decision(encounterId))
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it("rejects saveDraft() on an encounter that is in QA_REVIEW — without this, an auditor's pending review could reference coding data that was silently replaced out from under them", async () => {
+      const encounterId = await seed();
+      await service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, decision(encounterId));
+      await service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID);
+      await appPrisma.encounter.update({ where: { id: encounterId }, data: { status: "QA_REVIEW" } });
+
+      const changedDecision = decision(encounterId, {
+        diagnoses: [{ code: "N179", codeSystem: "ICD-10-CM", codeVersion: CODE_VERSION, role: "principal", presentOnAdmission: true }],
+      });
+      await expect(
+        service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, changedDecision)
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      // The real-world consequence this prevents: saveDraft() unconditionally
+      // sets encounter.status = IN_PROGRESS, which would silently bypass the
+      // pending QaReview entirely, not just overwrite the coding.
+      const encounter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(encounter.status).toBe("QA_REVIEW");
+      const stillOriginal = await appPrisma.codingDecision.findUniqueOrThrow({ where: { encounterId } });
+      expect(stillOriginal.diagnoses).toEqual([
+        { code: "J189", codeSystem: "ICD-10-CM", codeVersion: CODE_VERSION, role: "principal", presentOnAdmission: true },
+      ]);
+    });
+  });
+
   describe("saveDraft — other invariants", () => {
     it("rejects when the body's encounterId does not match the URL's encounter id", async () => {
       const encounterId = await seed();

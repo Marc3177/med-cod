@@ -34,7 +34,22 @@ export class CodingService {
       throw new BadRequestException("encounterId in body does not match URL");
     }
 
-    await this.assertEncounterExists(encounterId, facilityId);
+    const encounter = await this.assertEncounterExists(encounterId, facilityId);
+    // A third, more severe instance of the same bug class as finalize()'s
+    // and QueriesService's FINALIZED/QA_REVIEW guards — found while
+    // investigating the QA lifecycle, not by manual testing. Without this
+    // check, saveDraft() silently overwrote the coding decision an auditor
+    // was actively reviewing AND unconditionally set encounter.status to
+    // IN_PROGRESS below — bypassing the pending QaReview entirely, so the
+    // review the auditor eventually acts on could reference stale, already-
+    // replaced coding data. Same principle applied a third time: FINALIZED
+    // and QA_REVIEW are not currently editable by the coder; the only
+    // legitimate paths out are finalize()'s own re-finalization (after a
+    // QA return moves the encounter back to IN_PROGRESS) or the auditor's
+    // approve/return actions.
+    if (encounter.status === "FINALIZED" || encounter.status === "QA_REVIEW") {
+      throw new BadRequestException(`cannot save coding for an encounter in status ${encounter.status}`);
+    }
     await this.assertCodesAreValid(decision);
 
     const existing = await this.prisma.codingDecision.findUnique({ where: { encounterId } });

@@ -243,6 +243,31 @@ Full backend suite: 79/79 passing (up from 56). Typecheck clean. No leftover tes
 
 Files: [apps/api/src/modules/queries/queries.service.ts](../apps/api/src/modules/queries/queries.service.ts), [apps/api/src/modules/queries/queries.service.spec.ts](../apps/api/src/modules/queries/queries.service.spec.ts)
 
+### A third instance of the same bug class, found investigating QA before writing any QA test
+
+Before writing the QA lifecycle suite, the same question that found the Query bug was asked about `CodingService.saveDraft()`: does it check the encounter's own status, or only facility? A direct experiment (finalize an encounter, force it into `QA_REVIEW`, call `saveDraft()` with different diagnoses) confirmed it did not — `saveDraft()` silently overwrote the coding decision an auditor was actively reviewing **and** unconditionally reset `encounter.status` to `IN_PROGRESS`, completely bypassing the pending `QaReview` rather than merely racing it. This is more severe than the two bugs already fixed: it happens in the single most frequently called write path (every autosave), and the auditor's eventual approve/return decision would reference coding data that no longer existed.
+
+Fixed with the identical guard already established twice: reject `saveDraft()` when the encounter is `FINALIZED` or `QA_REVIEW`. Two deterministic regression tests added to the existing `coding.service.spec.ts` (not a new file — this is `CodingService`'s own behavior, just found via the QA investigation): one for each status, the `QA_REVIEW` case additionally asserting that the encounter status and the coding decision are both left completely untouched, not just that the call throws. Both proved to fail when the fix is reverted, then pass again once restored. Full suite 81/81 at this point (up from 79).
+
+Files: [apps/api/src/modules/coding/coding.service.ts](../apps/api/src/modules/coding/coding.service.ts), [apps/api/src/modules/coding/coding.service.spec.ts](../apps/api/src/modules/coding/coding.service.spec.ts)
+
+### QaService — the auditor approval/return lifecycle (Phase 2 of workflow state-machine stabilization)
+
+Same documentation-before-testing discipline: every `prisma.qaReview.` call site was grepped first, confirming `QaService` is the sole writer of the `QaReview` table. Legal states are `PENDING → APPROVED` and `PENDING → RETURNED`, both terminal — nothing transitions a review further once it leaves `PENDING`.
+
+14 tests, including two forms of determinism discipline learned from the two prior suites in this same pass:
+
+- `maybeSampleForReview()`'s randomness (`SAMPLING_RATE`) is tested directly by mocking `Math.random()` (`vi.spyOn`) rather than asserting on a real random outcome — one test forces a "hit" (`Math.random` → 0), one forces a "miss" (`Math.random` → 0.999), both proved to have teeth by disabling the sampling check entirely and confirming the "hit" test fails.
+- Every other test that needs a `PENDING` review sets it up directly (`seedPendingReview()`) rather than depending on `maybeSampleForReview` actually sampling, for the same reason `queries.service.spec.ts`'s `forceIntoQaReview()` exists — asserting behavior downstream of an unrelated random event is how the `CodingService` suite produced its one genuinely flaky test.
+
+Also covered: double-approval and double-return rejection (proved to have teeth by reverting the shared `PENDING` guard and confirming all 4 illegal-transition tests fail together), the mandatory non-empty return reason, facility isolation on every mutating call plus both list methods (using a fresh, disposable facility per test, same as the Query suite), not-found handling, and the full cross-module lifecycle: return → recode → re-finalize → re-sample, asserting the *original* `RETURNED` review row is still present and unchanged (`reason` intact) alongside the *new* `PENDING` review — the audit history of a chart that cycled through QA twice is not lost or overwritten.
+
+Unlike the Query suite, no new bug was found inside `QaService` itself — every one of its own transitions was already correctly guarded. This is itself informative: the state-corruption pattern this pass has now found three times all lived in the *other* services that mutate an encounter's status without checking whether QA already has a claim on it (`CodingService.finalize()`, `CodingService.saveDraft()`, `QueriesService.create()`/`send()`) — never in `QaService`'s own approve/return logic, which was written with the right checks from the start.
+
+Full backend suite: 95/95 passing (up from 81). Typecheck clean. No leftover test data (including the disposable facilities the isolation tests create).
+
+Files: [apps/api/src/modules/qa/qa.service.ts](../apps/api/src/modules/qa/qa.service.ts), [apps/api/src/modules/qa/qa.service.spec.ts](../apps/api/src/modules/qa/qa.service.spec.ts)
+
 ## Testing-tool notes (not app bugs)
 
 Several clicks during this session landed on stale element references from a prior screenshot/render and silently no-op'd (no network request fired). Every such case was caught by cross-checking the network request log or database state after the action, and retried with a fresh element reference or direct coordinates — never assumed successful from a screenshot alone. This is a property of the browser-automation tooling, not the application; it's noted here only because it explains why some steps in this report show a "first attempt failed, retried" pattern.

@@ -114,7 +114,7 @@ one-off seed script, a curl call, a cleanup script, deleted at the end of the se
 That caught real bugs in the moment but left nothing behind to catch a *future*
 regression of the same bug.
 
-Six spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
+Seven spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
 covering the modules whose bugs were the most subtle this project found, plus the P0
 data-integrity invariants and workflow state machines around the core coding write path:
 
@@ -159,9 +159,25 @@ data-integrity invariants and workflow state machines around the core coding wri
   queue while still sitting in the auditor's queue. A dedicated fixture helper
   (`forceIntoQaReview()`) sets status directly rather than relying on `QaService`'s
   random sampler, specifically to avoid the flaky-test trap the `CodingService` suite
-  hit one file earlier.
+  hit one file earlier. Investigating this bug also found a third instance of the same
+  class in `CodingService.saveDraft()` (fixed and tested in `coding.service.spec.ts`,
+  not a new file — see TEST_REPORT.md).
+- `src/modules/qa/qa.service.spec.ts` — the auditor approve/return lifecycle
+  (`PENDING → APPROVED` / `PENDING → RETURNED`, both terminal). `maybeSampleForReview()`'s
+  randomness is tested by mocking `Math.random()` directly (`vi.spyOn`) rather than
+  asserting on a real random outcome — both the "always samples" and "never samples"
+  branches proved to have teeth by disabling the check and confirming the expected test
+  fails. Every other test needing a `PENDING` review sets it up directly rather than
+  depending on the sampler, same discipline as `queries.service.spec.ts`'s
+  `forceIntoQaReview()`. Also covers double-approval/double-return rejection, the
+  mandatory return reason, facility isolation, and the full cross-module lifecycle
+  (return → recode → re-finalize → re-sample), asserting the original `RETURNED`
+  review's history survives unchanged alongside the new `PENDING` one. No new bug was
+  found inside `QaService` itself — informative on its own: every state-corruption bug
+  this pass found lived in a different service mutating an encounter's status without
+  checking whether QA already had a claim on it, never in `QaService`'s own logic.
 
-All six run against the actual local dev Postgres databases — not mocks — using the
+All seven run against the actual local dev Postgres databases — not mocks — using the
 same `MRN-QA-TEST` patient every manual seed script has used, via
 `src/test-support/encounter-fixture.ts` (`createTestEncounter` / `deleteTestEncounter`,
 which every test calls in an `afterEach` regardless of pass/fail). This is a deliberate
