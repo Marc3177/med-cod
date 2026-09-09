@@ -44,3 +44,53 @@ export async function deleteTestEncounter(prisma: AppPrismaService, encounterId:
   await prisma.clinicalDocument.deleteMany({ where: { encounterId } });
   await prisma.encounter.deleteMany({ where: { id: encounterId } });
 }
+
+/**
+ * A genuinely separate facility + patient + encounter, for facility-
+ * isolation tests — created fresh per call rather than relying on
+ * scripts/seed-second-facility.ts having been run, so no suite that uses
+ * this has an external setup dependency. Options mirror
+ * createTestEncounter's, plus an initial `status` (defaults to "NEW") since
+ * isolation tests often need to seed a QA_REVIEW/FINALIZED starting point
+ * directly rather than driving a whole workflow to reach it.
+ */
+export async function createOtherFacilityEncounter(
+  prisma: AppPrismaService,
+  options?: { status?: string; diagnoses?: Record<string, unknown>[]; finalized?: boolean }
+): Promise<{ encounterId: number; facilityId: number }> {
+  const facility = await prisma.facility.create({ data: { name: `Test Facility ${Date.now()}-${Math.random()}` } });
+  const patient = await prisma.patient.create({
+    data: { mrn: `MRN-TEST-${Date.now()}-${Math.random()}`, dateOfBirth: new Date("1990-01-01"), sex: "F" },
+  });
+  const encounter = await prisma.encounter.create({
+    data: {
+      patientId: patient.id,
+      facilityId: facility.id,
+      admissionDate: new Date("2026-01-01"),
+      status: (options?.status ?? "NEW") as never,
+      ...(options?.diagnoses
+        ? {
+            codingDecision: {
+              create: {
+                diagnoses: options.diagnoses as object,
+                procedures: [],
+                ...(options.finalized ? { finalizedAt: new Date(), finalizedById: 1 } : {}),
+              },
+            },
+          }
+        : {}),
+    },
+  });
+  return { encounterId: encounter.id, facilityId: facility.id };
+}
+
+export async function deleteOtherFacilityEncounter(
+  prisma: AppPrismaService,
+  encounterId: number,
+  facilityId: number
+): Promise<void> {
+  const encounter = await prisma.encounter.findUnique({ where: { id: encounterId } });
+  await deleteTestEncounter(prisma, encounterId);
+  if (encounter) await prisma.patient.deleteMany({ where: { id: encounter.patientId } });
+  await prisma.facility.deleteMany({ where: { id: facilityId } });
+}

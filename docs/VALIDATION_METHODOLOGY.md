@@ -114,9 +114,10 @@ one-off seed script, a curl call, a cleanup script, deleted at the end of the se
 That caught real bugs in the moment but left nothing behind to catch a *future*
 regression of the same bug.
 
-Seven spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
+Eleven spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
 covering the modules whose bugs were the most subtle this project found, plus the P0
-data-integrity invariants and workflow state machines around the core coding write path:
+data-integrity invariants, workflow state machines, and facility-isolation surface
+around the core coding write path:
 
 - `src/modules/suggestions/suggestions.service.spec.ts` — COPD-with-exacerbation, the
   "specified"/"from" word-filter fixes, the "Erb's, disease" false-positive guard,
@@ -176,13 +177,42 @@ data-integrity invariants and workflow state machines around the core coding wri
   found inside `QaService` itself — informative on its own: every state-corruption bug
   this pass found lived in a different service mutating an encounter's status without
   checking whether QA already had a claim on it, never in `QaService`'s own logic.
+- `src/modules/patients/patients.service.spec.ts`,
+  `src/modules/fhir/fhir.service.spec.ts`,
+  `src/modules/claims/claims.service.spec.ts` — the facility-isolation half of the
+  ownership audit: each tested for cross-facility read/write access including via a
+  *valid* ID belonging to another facility, not just a nonexistent one. No new bugs
+  found in any of the three — `FhirService.ingestBundle()` has no target-ID attack
+  surface by construction (every resource is freshly created, `facilityId` comes only
+  from the JWT), and `PatientsService`/`ClaimsService` were already scoping every query
+  correctly. New fixture helpers `createOtherFacilityEncounter` /
+  `deleteOtherFacilityEncounter` in `encounter-fixture.ts` create a genuinely separate
+  `Facility`+`Patient`+`Encounter` per call (a fake facility ID fails at the database's
+  own FK constraint, not the application layer).
+- `src/test-support/encounter-lifecycle.integration.spec.ts` — the capstone: one
+  deterministic test driving the full real state machine
+  (`NEW → IN_PROGRESS → QUERY_PENDING → IN_PROGRESS → QA_REVIEW → RETURNED →
+  IN_PROGRESS → QA_REVIEW → APPROVED → FINALIZED`) across all three services in a single
+  run, asserting at each stage that only the workflow owning the current state can
+  mutate it. `QaService`'s sampling is mocked deterministically at each `finalize()`
+  call. Spot-check teeth-proofed against the open-query-finalize guard rather than
+  re-proofing every individual assertion, since each guard already has its own
+  dedicated regression test elsewhere.
 
-All seven run against the actual local dev Postgres databases — not mocks — using the
+All eleven run against the actual local dev Postgres databases — not mocks — using the
 same `MRN-QA-TEST` patient every manual seed script has used, via
 `src/test-support/encounter-fixture.ts` (`createTestEncounter` / `deleteTestEncounter`,
 which every test calls in an `afterEach` regardless of pass/fail). This is a deliberate
 choice consistent with the project's whole testing philosophy: a mocked reference table
 could silently drift from the real FY2026 index and never be noticed.
+
+A cleanup-ordering bug in `queries.service.spec.ts`'s own `afterEach` was found and
+fixed during this phase: it silently leaked one orphaned `Patient` row per isolation
+test run (50 accumulated before being noticed) because it re-derived a patient from a
+since-deleted encounter's facility relation instead of tracking the patient ID directly.
+See TEST_REPORT.md for the full account; the fix generalizes to "track everything an
+`afterEach` needs to delete directly, never re-derive it after an earlier delete in the
+same cleanup may have already removed the path to it."
 
 Every one of these suites was verified to have real teeth, not just pass by
 construction, the same way: temporarily revert the real fix in the source file (exact

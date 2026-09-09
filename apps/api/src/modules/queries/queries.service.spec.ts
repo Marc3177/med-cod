@@ -38,7 +38,14 @@ describe("QueriesService", () => {
   const service = new QueriesService(appPrisma);
 
   const encounterIds: number[] = [];
-  const facilityIds: number[] = [];
+  // Tracked as {facilityId, patientId} pairs, not just facilityId — a real
+  // bug in an earlier version of this cleanup re-queried "which patients
+  // belong to this facility's encounters" AFTER the encounter had already
+  // been deleted by the encounterIds loop below (since
+  // seedOtherFacilityEncounter also pushes into encounterIds), so the
+  // lookup found nothing and the Patient row leaked on every run. Capturing
+  // patientId directly at seed time removes the ordering dependency.
+  const otherFacilities: { facilityId: number; patientId: number }[] = [];
 
   async function seed(): Promise<number> {
     const id = await createTestEncounter(appPrisma, [
@@ -61,7 +68,7 @@ describe("QueriesService", () => {
       data: { patientId: patient.id, facilityId: facility.id, admissionDate: new Date("2026-01-01"), status: "NEW" },
     });
     encounterIds.push(encounter.id);
-    facilityIds.push(facility.id);
+    otherFacilities.push({ facilityId: facility.id, patientId: patient.id });
     return { encounterId: encounter.id, facilityId: facility.id };
   }
 
@@ -71,13 +78,10 @@ describe("QueriesService", () => {
       await appPrisma.query.deleteMany({ where: { encounterId: id } });
       await deleteTestEncounter(appPrisma, id);
     }
-    while (facilityIds.length > 0) {
-      const id = facilityIds.pop()!;
-      const patientIds = await appPrisma.encounter.findMany({ where: { facilityId: id }, select: { patientId: true } });
+    while (otherFacilities.length > 0) {
+      const { facilityId: id, patientId } = otherFacilities.pop()!;
       await appPrisma.encounter.deleteMany({ where: { facilityId: id } });
-      for (const { patientId } of patientIds) {
-        await appPrisma.patient.deleteMany({ where: { id: patientId } });
-      }
+      await appPrisma.patient.deleteMany({ where: { id: patientId } });
       await appPrisma.facility.deleteMany({ where: { id } });
     }
   });

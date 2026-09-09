@@ -282,6 +282,42 @@ Full backend suite: 102/102 passing (up from 95). Typecheck clean.
 
 Files: [apps/api/src/modules/coding/coding.service.ts](../apps/api/src/modules/coding/coding.service.ts), [apps/api/src/modules/coding/coding.service.spec.ts](../apps/api/src/modules/coding/coding.service.spec.ts)
 
+### Facility isolation — Patients, FHIR, Claims
+
+Continuing the ownership audit into the isolation dimension per the same instruction to test indirect/child-resource access, not just the obvious direct endpoints: `PatientsService`, `FhirService`, and `ClaimsService` were each tested for whether a caller from one facility can read or influence data belonging to another, including via a *valid* ID for a resource that exists but belongs elsewhere (the case a naive "does this ID exist" check would miss).
+
+- **`PatientsService`** (5 tests): `listWorkQueue` is scoped to the caller's facility and correctly excludes `FINALIZED`/`QA_REVIEW` encounters from the queue; `getEncounter` rejects (403) a *valid* encounter ID belonging to another facility, and returns `NotFoundException` for a nonexistent one — distinguishing the two rather than leaking existence via error type.
+- **`FhirService`** (3 tests): an ingested bundle is always tied to the caller's own facility regardless of what the bundle content claims. By design, `Patient` has no `facilityId` (it's a shared/global directory across facilities, confirmed against the schema, not assumed) — so a shared MRN across two facilities correctly reuses one `Patient` row while creating two independently-owned `Encounter` rows, verified directly rather than assumed. A bundle missing a `Patient` or `Encounter` resource is rejected.
+- **`ClaimsService`** (4 tests): rejects a non-finalized encounter even at the caller's own facility; exports the correct UB-04-style shape for an own-facility finalized encounter (including the `"J189"` → `"J18.9"` display-formatting convention); rejects (403) a valid finalized encounter ID belonging to another facility; `NotFoundException` for a nonexistent ID.
+
+**No new bugs were found in any of the three.** This is treated as informative, not a non-result: `FhirService.ingestBundle()` takes no target ID at all (every resource is freshly `create`d, `facilityId` comes only from the JWT — there's no attack surface for cross-facility writes by construction) and `ClaimsService`/`PatientsService` were both already scoping every query by `facilityId` correctly. Unlike the ownership-lock bug class (found three times), isolation-by-facility was implemented consistently everywhere it was checked.
+
+New fixture helpers `createOtherFacilityEncounter`/`deleteOtherFacilityEncounter` were added to the shared `encounter-fixture.ts` (a genuinely separate `Facility`+`Patient`+`Encounter` created per call, since `Encounter.facilityId` has a real FK constraint — an arbitrary fake ID like `999999` fails at the database, not at the application layer, as the FHIR test initially discovered and fixed).
+
+Full backend suite: 114/114 passing (up from 102). Typecheck clean.
+
+Files: [apps/api/src/modules/patients/patients.service.spec.ts](../apps/api/src/modules/patients/patients.service.spec.ts), [apps/api/src/modules/fhir/fhir.service.spec.ts](../apps/api/src/modules/fhir/fhir.service.spec.ts), [apps/api/src/modules/claims/claims.service.spec.ts](../apps/api/src/modules/claims/claims.service.spec.ts), [apps/api/src/test-support/encounter-fixture.ts](../apps/api/src/test-support/encounter-fixture.ts)
+
+### Full-lifecycle integration test (capstone of the stabilization pass)
+
+One deterministic end-to-end test drives the complete real state machine across all three services in a single run — `NEW → IN_PROGRESS → QUERY_PENDING → IN_PROGRESS → QA_REVIEW → RETURNED → IN_PROGRESS → QA_REVIEW → APPROVED (→ FINALIZED)` — asserting at every stage that only the workflow which currently owns the encounter can mutate it: the exact invariant whose absence produced all three lock-bypass bugs and the open-query business rule found earlier in this pass. `QaService`'s sampling is mocked deterministically (`vi.spyOn(Math, "random")`) at each `finalize()` call rather than looped until chance cooperates, consistent with this pass's determinism discipline throughout.
+
+Spot-check teeth-proofed against the open-query-finalize guard (reverted, confirmed the integration test fails at that exact assertion, restored) rather than proofing every individual assertion again — each guard already has its own dedicated regression test in its own module's spec file; this test's job is proving the *sequence* is coherent end to end, not re-proving each guard in isolation.
+
+While finishing this test, a fragility in its own cleanup was found and fixed: cleanup was originally inline at the end of the test body, so a failed or interrupted run (such as the deliberate teeth-proof revert) never reached it and leaked the test encounter. Fixed by moving cleanup into `afterEach` against an outer-scope tracking array, the same pattern already used by every other spec file in this pass, so cleanup runs regardless of how the test exits.
+
+Full backend suite: 115/115 passing (up from 114). Typecheck clean.
+
+Files: [apps/api/src/test-support/encounter-lifecycle.integration.spec.ts](../apps/api/src/test-support/encounter-lifecycle.integration.spec.ts)
+
+### Test-fixture cleanup leak, found and fixed in the project's own test infrastructure
+
+Not an application bug — a bug in `queries.service.spec.ts`'s own `afterEach`. Its two-loop cleanup had an ordering dependency: the isolation tests' `seedOtherFacilityEncounter()` pushed the same encounter ID into both an `encounterIds` array and a `facilityIds` array, and `afterEach` processed `encounterIds` first — deleting the encounter — before using `facilityIds` to look up that facility's patients via `encounter.findMany({ where: { facilityId } })`, which by then found nothing (the encounter was already gone), so the `Patient` row backing it was never deleted. This silently leaked one orphaned `Patient` row per isolation test run, accumulating to 50 rows (confirmed via direct investigation: all 50 had zero attached encounters, ruling out an application-level leak and isolating it to this ordering bug) before it was noticed.
+
+Fixed by tracking `{ facilityId, patientId }` pairs directly instead of re-deriving the patient from a since-deleted encounter's facility relation. The 50 pre-existing orphaned rows (leaked before the fix existed, not reproducible by it) plus one leaked `Encounter` row (from an earlier interrupted run, found the same way) were cleaned up directly; a repeat check afterward confirmed zero orphaned `Facility`/`Patient`/`Encounter` rows remain.
+
+Files: [apps/api/src/modules/queries/queries.service.spec.ts](../apps/api/src/modules/queries/queries.service.spec.ts)
+
 ## Testing-tool notes (not app bugs)
 
 Several clicks during this session landed on stale element references from a prior screenshot/render and silently no-op'd (no network request fired). Every such case was caught by cross-checking the network request log or database state after the action, and retried with a fresh element reference or direct coordinates — never assumed successful from a screenshot alone. This is a property of the browser-automation tooling, not the application; it's noted here only because it explains why some steps in this report show a "first attempt failed, retried" pattern.
