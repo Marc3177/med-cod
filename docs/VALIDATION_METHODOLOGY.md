@@ -114,12 +114,15 @@ one-off seed script, a curl call, a cleanup script, deleted at the end of the se
 That caught real bugs in the moment but left nothing behind to catch a *future*
 regression of the same bug.
 
-Four spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
-covering the modules whose bugs were the most subtle this project found:
+Five spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
+covering the modules whose bugs were the most subtle this project found, plus the P0
+data-integrity invariants of the core coding write path:
 
 - `src/modules/suggestions/suggestions.service.spec.ts` — COPD-with-exacerbation, the
   "specified"/"from" word-filter fixes, the "Erb's, disease" false-positive guard,
-  evidence-graph dedup and multi-evidence, and suggestion-rejection scoping.
+  evidence-graph dedup and multi-evidence, suggestion-rejection scoping, the four
+  synonym-form clusters, matchType "prefix" resolution, and hidden-short-word
+  specificity loss.
 - `src/modules/documentation-gaps/documentation-gaps.service.spec.ts` — the
   exact-match-vs-prefix-match "already coded" bug, the "above"/"below" threshold
   directions, and the "no `code` field, ever" contract (`potential query ≠ diagnosis`)
@@ -132,8 +135,20 @@ covering the modules whose bugs were the most subtle this project found:
   into a different code's explanation, even a different codeSystem sharing the same
   literal code string, and an unlinked (gap-originated) query never appears as related
   to anything.
+- `src/modules/coding/coding.service.spec.ts` — P0 data integrity for the single write
+  path for coded diagnoses/procedures: invalid/non-billable code rejection, the
+  principal-diagnosis invariant (exactly one, enforced by a Zod `.refine`), POA
+  persistence, the audit trail's before/after snapshots, facility isolation, and the
+  finalize/QA_REVIEW state machine — including a genuine, previously-unknown bug this
+  suite caught while being written (see TEST_REPORT.md): `finalize()` could be called a
+  second time while an encounter sat in `QA_REVIEW`, silently overwriting the coding
+  decision an auditor was actively reviewing, because the guard only excluded
+  `FINALIZED`. This suite also caught its own flaky test: an assertion that finalize
+  always leaves status `FINALIZED` ignored that `QA_REVIEW` is an equally valid outcome
+  of the same call (QA sampling is randomized) — fixed to assert either, not by
+  suppressing the randomness.
 
-All four run against the actual local dev Postgres databases — not mocks — using the
+All five run against the actual local dev Postgres databases — not mocks — using the
 same `MRN-QA-TEST` patient every manual seed script has used, via
 `src/test-support/encounter-fixture.ts` (`createTestEncounter` / `deleteTestEncounter`,
 which every test calls in an `afterEach` regardless of pass/fail). This is a deliberate

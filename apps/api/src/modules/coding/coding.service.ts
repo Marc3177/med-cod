@@ -80,8 +80,19 @@ export class CodingService {
     if (!codingDecision) {
       throw new BadRequestException("cannot finalize an encounter with no coding decision saved");
     }
-    if (encounter.status === "FINALIZED") {
-      throw new BadRequestException("encounter is already finalized");
+    // FINALIZED and QA_REVIEW are both "already finalized, not currently
+    // editable" from the coder's side — QA_REVIEW means it's actively
+    // sitting with an auditor. Real bug found while writing P0 coverage
+    // for this state machine: this check only excluded FINALIZED, so a
+    // second finalize() call while an encounter sat in QA_REVIEW silently
+    // succeeded — overwriting the coding decision the auditor was
+    // reviewing and re-triggering QA sampling on top of the pending
+    // review, rather than being rejected the way it should be. The only
+    // legitimate way out of QA_REVIEW is the auditor's approve/return
+    // (RETURNED moves the encounter back to IN_PROGRESS, where finalize()
+    // is correctly allowed again for the recode-and-refinalize loop).
+    if (encounter.status === "FINALIZED" || encounter.status === "QA_REVIEW") {
+      throw new BadRequestException(`cannot finalize an encounter in status ${encounter.status}`);
     }
 
     const diagnoses = codingDecision.diagnoses as unknown as CodedDiagnosis[];

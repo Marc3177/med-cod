@@ -189,6 +189,46 @@ Verified: the 21-condition sweep (20 from the synonym-cluster pass, plus "acute 
 
 Files: [apps/api/src/modules/suggestions/suggestions.service.ts](../apps/api/src/modules/suggestions/suggestions.service.ts), [apps/api/src/modules/suggestions/suggestions.service.spec.ts](../apps/api/src/modules/suggestions/suggestions.service.spec.ts)
 
+## Known limitations (open, tracked, not silently ignored)
+
+Formally recorded rather than left as a comment buried in prose — each of these was deliberately *not* fixed, with a reason, so a future session doesn't need to rediscover why.
+
+### Multi-group weak-token matching (HIV → B20 false positive)
+
+- **Status:** OPEN
+- **Severity:** Investigate
+- **Architecture change:** NO
+- **Current behavior:** Known limitation, not a regression
+- **Observed because:** `"Syndrome, HIV infection, acute"` → B20. Dropping "HIV" (3 characters, below `MIN_SIGNIFICANT_WORD_LENGTH`) still leaves two surviving required groups (`infection`, `acute`) — both individually real English words, neither a stopword — so the entry passes `isDistinctiveEnough`'s 2-group threshold and matches a sentence that only mentions delirium and infection, never HIV.
+- **Not fixed because:** the shipped fix (`hasHiddenShortWord`) only gates the *single-group* case. Extending it to gate any multi-group entry with a dropped short word would very likely break a meaningful fraction of the 5,419 entries flagged in the sweep, where losing one short qualifier alongside 2+ other real words is genuinely low-risk (e.g. `"Abnormal, abnormality, abnormalities, electrocardiogram [ECG] [EKG]"` — dropping "ECG"/"EKG" barely matters when "abnormal" + "electrocardiogram" is already specific). Blanket-gating multi-group entries was rejected without first measuring that trade-off, same discipline that excluded the ulcer synonym cluster.
+- **Required next investigation:** determine whether some *kept* words (e.g. "acute", "chronic" — real words, but weak as sole distinguishing content) should count less than others toward the 2-group threshold, then measure both new false negatives and false positives from any candidate fix against a larger evaluation set before changing matcher semantics — not another one-off heuristic.
+- **Reference:** [apps/api/src/modules/suggestions/suggestions.service.ts](../apps/api/src/modules/suggestions/suggestions.service.ts) — `isDistinctiveEnough`, `hasHiddenShortWord`
+
+### Additional un-shipped synonym clusters
+
+- **Status:** OPEN
+- **Severity:** Low (one confirmed case: "acute MI" doesn't surface I21.x)
+- **Architecture change:** NO
+- **Observed because:** the plain MI entry `"Infarct, infarction, myocardium, myocardial"` → I21.9 requires all four word-forms literally; real documentation uses one. Same shape of bug as the four already-shipped clusters (hypertension/hypertensive, diabetes/diabetic, thrombosis/thrombotic, failure/failed).
+- **Not fixed because:** not yet individually verified against the real index for the same false-positive risk the ulcer cluster had (short co-occurring words that would collapse to over-broad matching). Every cluster added so far was checked one at a time — this one hasn't been yet.
+- **Required next step:** run the same isolated-segment / false-positive check used for the other four clusters (`infarct`/`infarction`, `myocardium`/`myocardial`) before adding them.
+
+## Stabilization: P0 automated test coverage
+
+A deliberate shift from feature work to coverage — per the explicit call to lock in the matcher work above and make the existing intelligence hard to break before doing anything else. Target: every business-critical invariant has an automated test, not a coverage percentage.
+
+### CodingService — the single write path for coded diagnoses and procedures
+
+21 tests: invalid-code and non-billable-code rejection (diagnoses and procedures separately), the principal-diagnosis invariant (exactly one, enforced by a Zod `.refine` in `packages/shared`), zero-diagnoses rejection, the `encounterId` body/URL mismatch check, POA persistence for both `true` and `false`, current (undefended) duplicate-diagnosis-code behavior pinned as a deliberate documentation of what exists rather than an assumption of what should, the audit trail's `CREATE_DRAFT`/`UPDATE_DRAFT` before/after snapshots, facility isolation on both `saveDraft` and `finalize`, and the finalize/QA_REVIEW state machine.
+
+**A real, previously-unknown bug was found while writing this suite, not manually testing beforehand.** `CodingService.finalize()`'s "already finalized" guard checked only `encounter.status === "FINALIZED"` — but `finalize()` itself calls `QaService.maybeSampleForReview()` afterward, which *randomly* (per `SAMPLING_RATE`) moves the encounter on to `QA_REVIEW`. A direct 20-run experiment confirmed the consequence: in every one of the 10 runs that landed in `QA_REVIEW`, a **second** `finalize()` call silently succeeded — overwriting the coding decision an auditor was actively reviewing, recomputing the DRG, and re-triggering QA sampling on top of an already-pending review. Fixed by rejecting `QA_REVIEW` alongside `FINALIZED`; the legitimate way out of `QA_REVIEW` remains the auditor's approve/return actions (`RETURNED` → `IN_PROGRESS`, where `finalize()` is correctly allowed again for the recode-and-refinalize loop).
+
+**The same randomness also produced a genuinely flaky test while writing this suite**, caught before it shipped: an early assertion that `finalize()` always leaves status `FINALIZED` failed at random (`QA_REVIEW` is an equally valid, equally correct outcome of the same call). Fixed by asserting either outcome, not by suppressing or mocking the randomness — the test now reflects what the system is actually allowed to do.
+
+Verified: a direct 20-encounter loop calling `finalize()` twice on every encounter that landed in `QA_REVIEW` — 10/10 second calls incorrectly succeeded before the fix; a deterministic regression test (set status to `QA_REVIEW` directly, not relying on the random sampler) was added and confirmed to fail when the fix is reverted, then pass again once restored, same as every other fix this session.
+
+Files: [apps/api/src/modules/coding/coding.service.ts](../apps/api/src/modules/coding/coding.service.ts), [apps/api/src/modules/coding/coding.service.spec.ts](../apps/api/src/modules/coding/coding.service.spec.ts)
+
 ## Testing-tool notes (not app bugs)
 
 Several clicks during this session landed on stale element references from a prior screenshot/render and silently no-op'd (no network request fired). Every such case was caught by cross-checking the network request log or database state after the action, and retried with a fresh element reference or direct coordinates — never assumed successful from a screenshot alone. This is a property of the browser-automation tooling, not the application; it's noted here only because it explains why some steps in this report show a "first attempt failed, retried" pattern.
