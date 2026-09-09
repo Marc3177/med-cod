@@ -114,9 +114,9 @@ one-off seed script, a curl call, a cleanup script, deleted at the end of the se
 That caught real bugs in the moment but left nothing behind to catch a *future*
 regression of the same bug.
 
-Five spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
+Six spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
 covering the modules whose bugs were the most subtle this project found, plus the P0
-data-integrity invariants of the core coding write path:
+data-integrity invariants and workflow state machines around the core coding write path:
 
 - `src/modules/suggestions/suggestions.service.spec.ts` — COPD-with-exacerbation, the
   "specified"/"from" word-filter fixes, the "Erb's, disease" false-positive guard,
@@ -147,8 +147,21 @@ data-integrity invariants of the core coding write path:
   always leaves status `FINALIZED` ignored that `QA_REVIEW` is an equally valid outcome
   of the same call (QA sampling is randomized) — fixed to assert either, not by
   suppressing the randomness.
+- `src/modules/queries/queries.service.spec.ts` — the full CDI query state machine
+  (`DRAFT → SENT → RESPONDED → RESOLVED`), documented from the actual implementation
+  before any test was written (grepped every write site to confirm this is the only
+  module that mutates `Query`). Every illegal and repeated transition, the multi-query
+  "only clear QUERY_PENDING once everything is resolved" interaction, facility isolation
+  on all four mutating calls, and a second real state-corruption bug this suite caught:
+  neither `create()` nor `send()` checked the *encounter's* own status, so raising or
+  sending a query against a `FINALIZED` or `QA_REVIEW` encounter silently overwrote it to
+  `QUERY_PENDING` — making a chart under active QA review reappear in the coder's work
+  queue while still sitting in the auditor's queue. A dedicated fixture helper
+  (`forceIntoQaReview()`) sets status directly rather than relying on `QaService`'s
+  random sampler, specifically to avoid the flaky-test trap the `CodingService` suite
+  hit one file earlier.
 
-All five run against the actual local dev Postgres databases — not mocks — using the
+All six run against the actual local dev Postgres databases — not mocks — using the
 same `MRN-QA-TEST` patient every manual seed script has used, via
 `src/test-support/encounter-fixture.ts` (`createTestEncounter` / `deleteTestEncounter`,
 which every test calls in an `afterEach` regardless of pass/fail). This is a deliberate

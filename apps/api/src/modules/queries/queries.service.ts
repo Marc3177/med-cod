@@ -31,7 +31,22 @@ export class QueriesService {
     relatedCode?: string,
     relatedCodeSystem?: string
   ) {
-    await this.assertEncounterExists(encounterId, facilityId);
+    const encounter = await this.assertEncounterExists(encounterId, facilityId);
+    // Real bug found while writing P0 coverage for this state machine (see
+    // docs/TEST_REPORT.md): neither create() nor send() checked the
+    // encounter's own status, only the query's. send() unconditionally set
+    // encounter.status = QUERY_PENDING — on a FINALIZED or QA_REVIEW
+    // encounter, that silently un-finalized it / made it reappear in the
+    // coder's work queue (which excludes QA_REVIEW) while an auditor's
+    // PENDING QaReview for it still existed, i.e. the same chart visible in
+    // two queues at once. The CDI query workflow (see the Query model's own
+    // schema comment) is part of active coding, not something that starts
+    // against a locked, already-reviewed chart — same "not currently
+    // editable" principle already enforced by CodingService.finalize()'s
+    // FINALIZED/QA_REVIEW guard, applied consistently here.
+    if (encounter.status === "FINALIZED" || encounter.status === "QA_REVIEW") {
+      throw new BadRequestException(`cannot raise a query on an encounter in status ${encounter.status}`);
+    }
     if (question.trim().length === 0) {
       throw new BadRequestException("question cannot be empty");
     }
@@ -50,6 +65,13 @@ export class QueriesService {
     const query = await this.assertQueryExists(queryId, facilityId);
     if (query.status !== "DRAFT") {
       throw new BadRequestException(`cannot send a query in status ${query.status}`);
+    }
+    // Covers a DRAFT query created before the encounter was finalized /
+    // sampled into QA_REVIEW — create()'s own guard (see above) only
+    // catches the case where the encounter was already locked at draft
+    // time, not one that becomes locked while a draft sits unsent.
+    if (query.encounter.status === "FINALIZED" || query.encounter.status === "QA_REVIEW") {
+      throw new BadRequestException(`cannot send a query on an encounter in status ${query.encounter.status}`);
     }
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.query.update({
