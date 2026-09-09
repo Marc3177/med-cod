@@ -409,6 +409,33 @@ const SYNONYM_CLUSTERS: string[][] = [
   // pattern as the four clusters above: real documentation uses one
   // spelling, the index headword happens to write both.
   ["respiration", "respiratory"],
+  // Fix #3 (docs/EVALUATION_HARNESS.md) — the already-documented "MI
+  // infarct/infarction cluster" Known Limitation, verified against the
+  // real index before shipping rather than guessed: the real headword is
+  // literally "Infarct, infarction, myocardium, myocardial" (all four
+  // words, confirmed identical across the entire I21.x subtree). Real
+  // documentation never writes all four, or even two from the same
+  // concept, at once.
+  //
+  // Deliberately shipped as TWO separate clusters, not one four-way
+  // cluster — same reasoning that already excluded the five-way ulcer
+  // cluster (see the SYNONYM_CLUSTERS doc comment above): "infarct"/
+  // "infarction" are word-forms of the EVENT, "myocardium"/"myocardial"
+  // are word-forms of the SITE, and they are two different concepts that
+  // happen to co-occur in this one compound headword, not interchangeable
+  // spellings of the same thing. A single four-way cluster would let bare
+  // anatomical language ("the myocardium appeared healthy on biopsy," no
+  // infarction ever mentioned) alone satisfy the whole requirement, once
+  // isDistinctiveEnough's length-6 fallback kicks in for a single
+  // remaining group — a real false-positive risk, checked and confirmed
+  // against exactly this sentence before choosing this structure. Two
+  // groups (AND between them, OR within each) requires real documentation
+  // to name both the event and the site, which "myocardial infarction" —
+  // or "MI" after abbreviation expansion — always does, while bare
+  // anatomical mentions of the myocardium alone correctly still don't
+  // match.
+  ["infarct", "infarction"],
+  ["myocardium", "myocardial"],
 ];
 
 /**

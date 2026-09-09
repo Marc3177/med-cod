@@ -96,6 +96,7 @@ Raw results for each experiment are kept as JSON snapshots in `apps/api/src/eval
 | Baseline | 73.5% | 59.0% | 36 | 13 | 25 | 14 | — |
 | **Fix #1** (`respiration`/`respiratory` cluster) | **77.6%** | **60.3%** | 38 | 11 | 25 | 14 | **0** |
 | **Fix #2** (numeric-qualifier digit preservation) | **77.6%** | **69.1%** | 38 | 11 | 17 | 22 | **0** |
+| **Fix #3** (MI `infarct`/`myocardial` two-cluster) | **81.6%** | 67.8% | 40 | 9 | 19 | 20 | **2 (both anticipated, see below)** |
 
 ### Fix #1 — SHIPPED
 
@@ -130,10 +131,22 @@ Raw results for each experiment are kept as JSON snapshots in `apps/api/src/eval
 
 **Verification:** `npm test` 153/153 (151 + 2 new tests). Zero leftover test data.
 
-### Fix #3 — not yet run
+### Fix #3 — SHIPPED (with a deliberate, verified design decision, and an anticipated tradeoff)
 
-Per the controlled-experiment plan, negation is deliberately excluded from the next simple terminology fixes and reserved for its own dedicated experiment — it's a semantically different problem (context/scope modeling) from a missing synonym cluster or a dropped numeric qualifier, and deserves to be measured on its own rather than folded into a "terminology improvements" bucket.
+**Change:** added the real MI headword — verified against the actual FY2026 index (`"Infarct, infarction, myocardium, myocardial"`, confirmed identical across the whole I21.x subtree) — as **two** `SYNONYM_CLUSTERS` entries, not one four-way cluster: `["infarct", "infarction"]` (event word-forms) and `["myocardium", "myocardial"]` (site word-forms), both still required together. A naive single four-way cluster was considered and rejected *before* shipping, the same way the five-way ulcer cluster was rejected in the original matcher work: checked directly against a constructed adversarial sentence ("Biopsy of the myocardium was performed...", no infarction language at all) and confirmed it would wrongly fire I21.9 once `isDistinctiveEnough`'s length-6 fallback treated the single remaining cluster group as sufficient on its own. The two-cluster design correctly stays silent on that same sentence.
+
+**Exact case-level diff against Fix #2:**
+
+- `syn-08` (synonyms_morphology): `I21.9` FN → **TP** — the intended fix.
+- `abbr-10` (abbreviations): `I21.9` FN → **TP** — same, via the MI abbreviation expansion.
+- `neg-03` (negation): `I21.9` TN → **FP** — anticipated, not new. This case's own `reason` field (written *before* this fix shipped) predicted exactly this: "this looks like correct negation handling, but isn't... expected to currently FAIL once the MI cluster ships." MI was previously unmatchable at all, which accidentally masked the negation gap on this one case; Fix #3 doesn't make negation worse, it removes the accidental mask that was hiding a gap every other condition (pneumonia, sepsis, DVT...) already has.
+- `temp-01` (temporal_context): `I21.9` TN → **FP**, same reason. Its `expectedMatches` (`I25.2`, the history-of-MI code) remains FN either way — a separate, not-yet-traced phrasing gap in the I25.2 entry itself (likely requires "old"/"healed," not generic "history of"), unrelated to this fix.
+- Every other one of the 88 annotated code checks: unchanged.
+
+**Decision:** ship — put to an explicit judgment call rather than decided unilaterally, given the real (if small, anticipated) precision cost. Recall 77.6%→81.6%, precision 69.1%→67.8%. The two negation-category changes are the deliberate unmasking of an already-tracked, already-scoped-for-its-own-experiment limitation, not a new defect this fix introduced — negation's real, honest error rate doesn't get worse because of Fix #3, it becomes visible on 2 more cases where it was previously and coincidentally hidden.
+
+**Verification:** `npm test` 155/155 (153 + 2 new tests: the intended MI-cluster regression test, and a dedicated test proving the two-cluster design choice — "myocardium" alone must not fire I21.9). Teeth-proofed twice: (1) removed both new cluster entries, confirmed the MI-match test fails with the exact predicted symptom; (2) merged them into a single naive four-way cluster instead of restoring the real fix, and confirmed the anatomical-language guard test fails exactly as the design rationale predicted (`expected [ 'I515', 'I219' ] to not include 'I219'`) — direct proof the two-cluster structure, not just "a" fix, is what's required. Zero leftover test data.
 
 ### After Fix #1 + Fix #2 + Fix #3 — combined run not yet performed
 
-Per the plan, the three fixes are combined and re-evaluated together only after each has been verified in isolation.
+Per the plan, the three fixes are combined and re-evaluated together only after each has been verified in isolation. All three are now shipped individually; the combined run is the next step.

@@ -91,8 +91,13 @@ describe("SuggestionsService", () => {
       content: "Patient in acute respiratory failure requiring emergent intubation.",
       expectCode: "J9600",
     },
+    {
+      label: "acute myocardial infarction",
+      content: "Acute myocardial infarction confirmed by troponin elevation and EKG changes.",
+      expectCode: "I219",
+    },
   ])(
-    "matches $label via a synonym-cluster word-form (regression: EVALUATION_HARNESS.md Fix #1 — the P1-E0 evaluation baseline's confirmed synonyms_morphology gap)",
+    "matches $label via a synonym-cluster word-form (regression: EVALUATION_HARNESS.md Fix #1/#3 — the P1-E0 evaluation baseline's confirmed synonyms_morphology gaps)",
     async ({ content, expectCode }) => {
       const encounterId = await seed([{ type: "DISCHARGE_SUMMARY", content }]);
 
@@ -283,5 +288,26 @@ describe("SuggestionsService", () => {
 
     expect(codes).toContain("E119");
     expect(codes).not.toContain("E109");
+  });
+
+  /**
+   * Regression: EVALUATION_HARNESS.md Fix #3, verifying the specific
+   * design decision it made (not just the fix itself). The real index
+   * headword for MI is "Infarct, infarction, myocardium, myocardial" —
+   * shipped as TWO synonym clusters (event word-forms, site word-forms),
+   * not one four-way cluster, precisely to avoid this: a single cluster
+   * would let bare anatomical language ("myocardium") alone satisfy the
+   * whole requirement once isDistinctiveEnough's length-6 fallback
+   * kicked in, with no infarction ever mentioned. Confirmed against this
+   * exact sentence before choosing the two-cluster design, not assumed.
+   */
+  it("does not suggest myocardial infarction from bare anatomical language mentioning only the myocardium", async () => {
+    const encounterId = await seed([
+      { type: "DISCHARGE_SUMMARY", content: "Biopsy of the myocardium was performed and sent to pathology." },
+    ]);
+
+    const suggestions = await service.listSuggestions(encounterId, TEST_FACILITY_ID);
+
+    expect(suggestions.map((s) => s.code)).not.toContain("I219");
   });
 });
