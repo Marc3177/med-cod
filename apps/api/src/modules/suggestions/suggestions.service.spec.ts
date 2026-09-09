@@ -86,8 +86,13 @@ describe("SuggestionsService", () => {
       content: "Patient presents with acute CHF exacerbation.",
       expectCode: "I509",
     },
+    {
+      label: "acute respiratory failure",
+      content: "Patient in acute respiratory failure requiring emergent intubation.",
+      expectCode: "J9600",
+    },
   ])(
-    "matches $label via a synonym-cluster word-form (regression: TEST_REPORT 'Synonym clusters')",
+    "matches $label via a synonym-cluster word-form (regression: EVALUATION_HARNESS.md Fix #1 — the P1-E0 evaluation baseline's confirmed synonyms_morphology gap)",
     async ({ content, expectCode }) => {
       const encounterId = await seed([{ type: "DISCHARGE_SUMMARY", content }]);
 

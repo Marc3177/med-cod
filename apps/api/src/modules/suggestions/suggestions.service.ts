@@ -399,6 +399,16 @@ const SYNONYM_CLUSTERS: string[][] = [
   ["diabetes", "diabetic"],
   ["thrombosis", "thrombotic"],
   ["failure", "failed"],
+  // Found by the P1-E0 evaluation harness (docs/EVALUATION_HARNESS.md,
+  // Fix #1), not guessed: "acute respiratory failure" — one of the most
+  // common, highest CC/MCC-impact inpatient diagnoses — matched nothing,
+  // because the real index entry ("Failure, failed, respiration,
+  // respiratory, acute" -> J96.00) requires "respiration" AND "respiratory"
+  // as two separate words, and real documentation only ever writes
+  // "respiratory failure," never "respiration respiratory failure." Same
+  // pattern as the four clusters above: real documentation uses one
+  // spelling, the index headword happens to write both.
+  ["respiration", "respiratory"],
 ];
 
 /**

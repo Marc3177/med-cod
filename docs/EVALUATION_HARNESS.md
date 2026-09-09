@@ -86,3 +86,32 @@ Worth recording as evidence the verification discipline works, not swept away: `
 ## Using this harness for future changes
 
 Per the explicit instruction this milestone was scoped under: **do not ship all three of `P1_EVIDENCE_EVALUATION.md`'s proposed fixes at once.** Run `baseline → fix #1 → evaluate → fix #2 → evaluate → fix #3 → evaluate`, and diff each category's recall/precision against this baseline table — not against a single motivating example. A fix should be judged on whether it improved recall *without* dropping precision elsewhere (the exact failure mode `MAX_PREFIX_EXPANSION` produced for acute kidney injury earlier in this project's history). Update this document's baseline table after each verified step, so it stays the living record of the engine's measured behavior over time, the same way `TEST_REPORT.md` is for correctness.
+
+Raw results for each experiment are kept as JSON snapshots in `apps/api/src/evaluation/results/` (`baseline-*.json`, `fix1-*.json`, ...) specifically so a later experiment can be diffed against an earlier one at the individual-case level, not just the aggregate percentages — see the worked example below.
+
+## Experiment log
+
+| Version | Recall | Precision | TP | FN | FP | TN | Regression cases |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Baseline | 73.5% | 59.0% | 36 | 13 | 25 | 14 | — |
+| **Fix #1** (`respiration`/`respiratory` cluster) | **77.6%** | **60.3%** | 38 | 11 | 25 | 14 | **0** |
+
+### Fix #1 — SHIPPED
+
+**Change:** added `["respiration", "respiratory"]` as a fifth entry in `SYNONYM_CLUSTERS` (`suggestions.service.ts`) — the exact same proven pattern as the four existing clusters, applied to the confirmed gap this evaluation found (see the baseline's finding on `syn-09`/`avc-04`/the "acute respiratory failure" miss).
+
+**Exact case-level diff against baseline** (computed by diffing `baseline-detail.json` against `fix1-detail.json` outcome-by-outcome, not by re-reading aggregate percentages):
+
+- `syn-09` (synonyms_morphology): `J96.00` FN → **TP**
+- `avc-04` (acute_vs_chronic): `J96.00` FN → **TP**
+- Every other one of the 88 annotated code checks across all 70 cases: **unchanged.**
+
+**Decision:** ship. Per the stated rule ("a meaningful improvement in the intended category without unacceptable regression in precision or unrelated categories in it"): recall improved in exactly the two categories the fix targets (`synonyms_morphology` 0.80→0.90, `acute_vs_chronic` 0.833→1.00), precision in both categories held or improved (no new false positives introduced anywhere — `FP` count is identical, 25, before and after), and all other 10 categories are byte-for-byte identical to baseline. This is the clean case the decision rule was written for: a fix that improves exactly what it targets and touches nothing else.
+
+**Verification:** `npm test` 151/151 (150 + 1 new permanent regression test added to `suggestions.service.spec.ts`'s existing synonym-cluster table). Teeth-proofed: temporarily removed the new cluster entry, confirmed the new regression test fails with the exact predicted symptom (`expected [ 'J989' ] to include 'J9600'`), restored, confirmed green again. Zero leftover test data.
+
+`abbr-10` (the MI abbreviation case) and `temp-01` (MI history) remain unchanged FN, as predicted — they depend on the separate, not-yet-shipped `infarct`/`infarction`/`myocardium`/`myocardial` cluster (Fix #3), not this one.
+
+### Fix #2 and Fix #3 — not yet run
+
+Per the controlled-experiment plan, negation is deliberately excluded from the next simple terminology fixes and reserved for its own dedicated experiment — it's a semantically different problem (context/scope modeling) from a missing synonym cluster or a dropped numeric qualifier, and deserves to be measured on its own rather than folded into a "terminology improvements" bucket.
