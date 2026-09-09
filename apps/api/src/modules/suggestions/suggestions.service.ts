@@ -150,15 +150,16 @@ export class SuggestionsService {
       this.terminologyService.loadAliases(),
     ]);
 
-    // Precompute each entry's significant words once, rather than re-parsing
-    // the same term string for every sentence — the expensive part is the
-    // split/regex work, not the substring checks. Entries that are just one
-    // short-ish word (e.g. "right", "left", "with") are dropped entirely —
-    // otherwise a generic laterality word matches almost any sentence (this
-    // caught a real false positive during testing: "right" alone matched
-    // "Ear, wax, right" against an unrelated sentence).
-    const cmEntryWords = cmEntries.map((entry) => ({ entry, words: significantWords(entry.term) })).filter((e) => isDistinctiveEnough(e.words));
-    const pcsEntryWords = pcsEntries.map((entry) => ({ entry, words: significantWords(entry.term) })).filter((e) => isDistinctiveEnough(e.words));
+    // Precompute each entry's required word-groups once, rather than
+    // re-parsing the same term string for every sentence — the expensive
+    // part is the split/regex work, not the substring checks. Entries that
+    // are just one short-ish word (e.g. "right", "left", "with") are
+    // dropped entirely — otherwise a generic laterality word matches almost
+    // any sentence (this caught a real false positive during testing:
+    // "right" alone matched "Ear, wax, right" against an unrelated
+    // sentence).
+    const cmEntryWords = cmEntries.map((entry) => ({ entry, groups: significantWordGroups(entry.term) })).filter((e) => isDistinctiveEnough(e.groups));
+    const pcsEntryWords = pcsEntries.map((entry) => ({ entry, groups: significantWordGroups(entry.term) })).filter((e) => isDistinctiveEnough(e.groups));
 
     // A code can match many sentences now (no early "already seen, skip"
     // exit), so its reference-table row is cached the first time it's
@@ -180,9 +181,9 @@ export class SuggestionsService {
       // "PRES" (an acronym) would false-positive-match inside "impression".
       const sentenceWords = new Set(tokenizeWords(expandedSentence));
 
-      for (const { entry, words } of cmEntryWords) {
+      for (const { entry, groups } of cmEntryWords) {
         if (evidence.length >= MAX_EVIDENCE_ITEMS) break;
-        if (words.length === 0 || !words.every((w) => sentenceWords.has(w))) continue;
+        if (groups.length === 0 || !groupsSatisfied(groups, sentenceWords)) continue;
 
         if (!cmCodeCache.has(entry.codeValue)) {
           const found = await this.referencePrisma.icd10CmCode.findUnique({
@@ -205,9 +206,9 @@ export class SuggestionsService {
         });
       }
 
-      for (const { entry, words } of pcsEntryWords) {
+      for (const { entry, groups } of pcsEntryWords) {
         if (evidence.length >= MAX_EVIDENCE_ITEMS) break;
-        if (words.length === 0 || !words.every((w) => sentenceWords.has(w))) continue;
+        if (groups.length === 0 || !groupsSatisfied(groups, sentenceWords)) continue;
 
         if (entry.matchType === "code") {
           if (!pcsCodeCache.has(entry.codeValue)) {
@@ -320,13 +321,85 @@ const GENERIC_MEDICAL_WORDS = new Set([
  */
 const CONNECTOR_WORDS = new Set(["with", "from"]);
 
-function isDistinctiveEnough(words: string[]): boolean {
-  if (words.length >= 2) return true;
-  return words.some((w) => w.length >= MIN_DISTINCTIVE_WORD_LENGTH);
+/**
+ * Explicit, data-verified clusters of word-FORM variants — noun/adjective/
+ * verb spellings of the same underlying concept — that the CMS Alphabetic
+ * Index writes as consecutive required words in a single headword (e.g.
+ * "Hypertension, hypertensive" as literally the first two words of the I10
+ * family). Before this fix, significantWords() required every one of these
+ * spellings verbatim — but real documentation only ever uses ONE spelling,
+ * so an entry needing both "hypertension" and "hypertensive" in the same
+ * sentence almost never matched anything. Found via a systematic sweep of
+ * 20 common inpatient conditions against the real index (see
+ * docs/TEST_REPORT.md "Synonym clusters"), not guessed: 5 of 9 failures in
+ * that sweep traced to this exact pattern.
+ *
+ * Each inner array is one cluster — matching now requires only ONE member
+ * present in the sentence, not all of them. Deliberately a curated,
+ * verified list, not a generic stemmer: a generic stemmer risks
+ * false-merging genuinely different concepts that happen to share a
+ * prefix (e.g. "hepatic" and "hepatitis" are NOT interchangeable, even
+ * though a naive stemmer would group them) — the same reasoning that kept
+ * GENERIC_MEDICAL_WORDS and CONNECTOR_WORDS above as explicit lists rather
+ * than an algorithm.
+ *
+ * A fifth cluster — ulcer/ulcerated/ulcerating/ulceration/ulcerative — was
+ * found in the same sweep (it explains the "Pressure ulcer" failure) but is
+ * deliberately NOT included here. Checking it against the real index first
+ * (same discipline as everything else in this list) found it introduces
+ * real new false positives: several pressure-ulcer entries pair the
+ * cluster with a genuinely distinguishing but SHORT word that
+ * MIN_SIGNIFICANT_WORD_LENGTH silently drops — "Ulcer, ..., gum" -> K06.8
+ * and "Ulcer, ..., lip" -> K13.0 collapse to "does the sentence contain
+ * 'ulcer'?" once the cluster relaxation is applied, which is far too broad.
+ * Fixing that needs a real fix for short-but-meaningful words being
+ * dropped by length, which is a separate, not-yet-done piece of work — see
+ * docs/TEST_REPORT.md "Synonym clusters".
+ */
+const SYNONYM_CLUSTERS: string[][] = [
+  ["hypertension", "hypertensive"],
+  ["diabetes", "diabetic"],
+  ["thrombosis", "thrombotic"],
+  ["failure", "failed"],
+];
+
+function isDistinctiveEnough(groups: string[][]): boolean {
+  if (groups.length >= 2) return true;
+  return groups.some((group) => group.some((w) => w.length >= MIN_DISTINCTIVE_WORD_LENGTH));
 }
 
-function significantWords(term: string): string[] {
-  return tokenizeWords(term.toLowerCase())
+/** True when every group has at least one member present in the sentence —
+ *  a group of size 1 behaves exactly like the old "every word required"
+ *  check; a synonym-cluster group of size >1 is satisfied by any one
+ *  spelling. */
+function groupsSatisfied(groups: string[][], sentenceWords: Set<string>): boolean {
+  return groups.every((group) => group.some((w) => sentenceWords.has(w)));
+}
+
+/**
+ * The significant words of a term, grouped so that members of the same
+ * SYNONYM_CLUSTERS entry sit together (an OR-requirement) while everything
+ * else stays its own single-word group (an AND-requirement, same as
+ * before). Order doesn't matter for matching, only group membership.
+ */
+function significantWordGroups(term: string): string[][] {
+  const words = tokenizeWords(term.toLowerCase())
     .filter((w) => w.length >= MIN_SIGNIFICANT_WORD_LENGTH)
     .filter((w) => !GENERIC_MEDICAL_WORDS.has(w) && !CONNECTOR_WORDS.has(w));
+
+  const groups: string[][] = [];
+  const consumed = new Set<string>();
+  for (const w of words) {
+    if (consumed.has(w)) continue;
+    const cluster = SYNONYM_CLUSTERS.find((c) => c.includes(w));
+    if (cluster) {
+      const present = words.filter((x) => cluster.includes(x));
+      present.forEach((p) => consumed.add(p));
+      groups.push(present);
+    } else {
+      consumed.add(w);
+      groups.push([w]);
+    }
+  }
+  return groups;
 }

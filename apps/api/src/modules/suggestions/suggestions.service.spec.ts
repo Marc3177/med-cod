@@ -65,6 +65,53 @@ describe("SuggestionsService", () => {
     expect(suggestions.map((s) => s.code)).toContain("T86892");
   });
 
+  it.each([
+    {
+      label: "hypertensive urgency",
+      content: "Blood pressure elevated, consistent with hypertensive urgency.",
+      expectCode: "I160",
+    },
+    {
+      label: "type 2 diabetes",
+      content: "History of type 2 diabetes mellitus, well controlled.",
+      expectCode: "E119",
+    },
+    {
+      label: "DVT",
+      content: "Ultrasound confirmed deep vein thrombosis of the left leg.",
+      expectCode: "I8290",
+    },
+    {
+      label: "CHF exacerbation",
+      content: "Patient presents with acute CHF exacerbation.",
+      expectCode: "I509",
+    },
+  ])(
+    "matches $label via a synonym-cluster word-form (regression: TEST_REPORT 'Synonym clusters')",
+    async ({ content, expectCode }) => {
+      const encounterId = await seed([{ type: "DISCHARGE_SUMMARY", content }]);
+
+      const suggestions = await service.listSuggestions(encounterId, TEST_FACILITY_ID);
+
+      expect(suggestions.map((s) => s.code)).toContain(expectCode);
+    }
+  );
+
+  it("does NOT relax the ulcer/ulcerated/ulcerating/ulceration/ulcerative cluster — deliberately excluded because it collapses short-anatomical-word entries to false positives (regression: TEST_REPORT 'Synonym clusters')", async () => {
+    const encounterId = await seed([
+      { type: "DISCHARGE_SUMMARY", content: "Stage 2 pressure ulcer noted on the sacrum." },
+    ]);
+
+    const suggestions = await service.listSuggestions(encounterId, TEST_FACILITY_ID);
+
+    // Must NOT include K06.8 ("Ulcer, ..., gum") or K13.0 ("Ulcer, ...,
+    // lip") — neither gum nor lip nor sacrum is mentioned; a relaxed ulcer
+    // cluster would collapse both entries to "does the sentence say
+    // ulcer?" and match them anyway.
+    expect(suggestions.map((s) => s.code)).not.toContain("K068");
+    expect(suggestions.map((s) => s.code)).not.toContain("K130");
+  });
+
   it("still correctly matches a previously-passing case (aspiration pneumonia)", async () => {
     const encounterId = await seed([
       { type: "DISCHARGE_SUMMARY", content: "Noted to have aspiration pneumonia on imaging." },
