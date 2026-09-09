@@ -114,10 +114,11 @@ one-off seed script, a curl call, a cleanup script, deleted at the end of the se
 That caught real bugs in the moment but left nothing behind to catch a *future*
 regression of the same bug.
 
-Eleven spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
+Twelve spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
 covering the modules whose bugs were the most subtle this project found, plus the P0
-data-integrity invariants, workflow state machines, facility-isolation surface, and
-transaction atomicity around the core coding write path:
+data-integrity invariants, workflow state machines, facility-isolation surface,
+transaction atomicity, and cross-service Query/QA ownership around the core coding
+write path:
 
 - `src/modules/suggestions/suggestions.service.spec.ts` — COPD-with-exacerbation, the
   "specified"/"from" word-filter fixes, the "Erb's, disease" false-positive guard,
@@ -175,7 +176,16 @@ transaction atomicity around the core coding write path:
   random sampler, specifically to avoid the flaky-test trap the `CodingService` suite
   hit one file earlier. Investigating this bug also found a third instance of the same
   class in `CodingService.saveDraft()` (fixed and tested in `coding.service.spec.ts`,
-  not a new file — see TEST_REPORT.md).
+  not a new file — see TEST_REPORT.md). Later extended with a **fourth instance**,
+  found by cross-service Query + QA integration testing rather than a per-service pass:
+  `respond()`/`resolve()` also had no encounter-status guard. Sequential API use can
+  never produce a `SENT`/`RESPONDED` query alongside a `FINALIZED`/`QA_REVIEW`
+  encounter (the open-query business rule prevents it) — but that's a TOCTOU race, not
+  a guarantee: `create()`/`send()` can both pass their own status checks before
+  `finalize()`'s transaction commits around them. The resulting state was constructed
+  directly (not via the literal race) and confirmed `resolve()` would silently overwrite
+  `QA_REVIEW` back to `IN_PROGRESS`. Fixed identically to the other three; teeth-proofed
+  by disabling each new guard and confirming the exact corruption reproduces.
 - `src/modules/qa/qa.service.spec.ts` — the auditor approve/return lifecycle
   (`PENDING → APPROVED` / `PENDING → RETURNED`, both terminal). `maybeSampleForReview()`'s
   randomness is tested by mocking `Math.random()` directly (`vi.spyOn`) rather than
@@ -211,8 +221,14 @@ transaction atomicity around the core coding write path:
   call. Spot-check teeth-proofed against the open-query-finalize guard rather than
   re-proofing every individual assertion, since each guard already has its own
   dedicated regression test elsewhere.
+- `src/test-support/query-qa-integration.spec.ts` — the cross-service case none of the
+  per-service suites cover: a query raised, answered, and resolved *entirely within* the
+  window between a QA return and the next finalize, not just "return, then recode, then
+  finalize." Confirms the open-query business rule applies identically the second time
+  through the loop, and that the original `RETURNED` review's history and the full audit
+  trail both survive intact.
 
-All eleven run against the actual local dev Postgres databases — not mocks — using the
+All twelve run against the actual local dev Postgres databases — not mocks — using the
 same `MRN-QA-TEST` patient every manual seed script has used, via
 `src/test-support/encounter-fixture.ts` (`createTestEncounter` / `deleteTestEncounter`,
 which every test calls in an `afterEach` regardless of pass/fail). This is a deliberate

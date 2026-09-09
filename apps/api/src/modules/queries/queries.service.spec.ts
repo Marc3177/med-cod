@@ -369,5 +369,84 @@ describe("QueriesService", () => {
       const encounter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
       expect(encounter.status).toBe("QA_REVIEW");
     });
+
+    /**
+     * Under normal sequential use, a SENT/RESPONDED query can never coexist
+     * with a FINALIZED/QA_REVIEW encounter — finalize()'s own business rule
+     * (see coding.service.ts) refuses to finalize while any query is still
+     * open. But that's a TOCTOU race, not a hard guarantee: create() and
+     * send() both only check the encounter's status at the moment they run,
+     * so both can pass while the encounter is still IN_PROGRESS, and then
+     * finalize()'s transaction can commit around them — leaving exactly
+     * this state. Constructed directly here (not via the race itself, which
+     * isn't practical to reproduce in a sequential test) because the
+     * resulting STATE is what respond()/resolve() need to defend against,
+     * however it's reached. Direct experiment before this guard existed
+     * confirmed both respond() and resolve() succeeded unconditionally here
+     * — resolve() went on to silently overwrite QA_REVIEW back to
+     * IN_PROGRESS, discarding the auditor's active review.
+     */
+    async function seedSentQueryOnQaReviewEncounter(): Promise<{ encounterId: number; queryId: number }> {
+      const encounterId = await seed();
+      const query = await service.create(encounterId, CODER_ID, TEST_FACILITY_ID, "Question?");
+      await service.send(query.id, TEST_FACILITY_ID);
+      await forceIntoQaReview(encounterId);
+      return { encounterId, queryId: query.id };
+    }
+
+    it("rejects respond() for a SENT query whose encounter is in QA_REVIEW (fourth instance of the lock-bypass bug class)", async () => {
+      const { encounterId, queryId } = await seedSentQueryOnQaReviewEncounter();
+
+      await expect(
+        service.respond(queryId, PROVIDER_ID, TEST_FACILITY_ID, "An answer.")
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      const encounter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(encounter.status).toBe("QA_REVIEW");
+      const query = await appPrisma.query.findUniqueOrThrow({ where: { id: queryId } });
+      expect(query.status).toBe("SENT");
+    });
+
+    it("rejects resolve() for a RESPONDED query whose encounter is in QA_REVIEW — without this, resolving would silently end the auditor's active review", async () => {
+      const encounterId = await seed();
+      const query = await service.create(encounterId, CODER_ID, TEST_FACILITY_ID, "Question?");
+      await service.send(query.id, TEST_FACILITY_ID);
+      // respond() while the encounter is still legitimately IN_PROGRESS —
+      // isolates this test to resolve()'s own guard, not respond()'s.
+      await service.respond(query.id, PROVIDER_ID, TEST_FACILITY_ID, "An answer.");
+      await forceIntoQaReview(encounterId);
+
+      await expect(service.resolve(query.id, CODER_ID, TEST_FACILITY_ID)).rejects.toBeInstanceOf(
+        BadRequestException
+      );
+
+      const encounter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(encounter.status).toBe("QA_REVIEW");
+      const queryAfter = await appPrisma.query.findUniqueOrThrow({ where: { id: query.id } });
+      expect(queryAfter.status).toBe("RESPONDED");
+    });
+
+    it("rejects respond() for a SENT query whose encounter is FINALIZED", async () => {
+      const encounterId = await seed();
+      const query = await service.create(encounterId, CODER_ID, TEST_FACILITY_ID, "Question?");
+      await service.send(query.id, TEST_FACILITY_ID);
+      await appPrisma.encounter.update({ where: { id: encounterId }, data: { status: "FINALIZED" } });
+
+      await expect(
+        service.respond(query.id, PROVIDER_ID, TEST_FACILITY_ID, "An answer.")
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it("rejects resolve() for a RESPONDED query whose encounter is FINALIZED", async () => {
+      const encounterId = await seed();
+      const query = await service.create(encounterId, CODER_ID, TEST_FACILITY_ID, "Question?");
+      await service.send(query.id, TEST_FACILITY_ID);
+      await service.respond(query.id, PROVIDER_ID, TEST_FACILITY_ID, "An answer.");
+      await appPrisma.encounter.update({ where: { id: encounterId }, data: { status: "FINALIZED" } });
+
+      await expect(service.resolve(query.id, CODER_ID, TEST_FACILITY_ID)).rejects.toBeInstanceOf(
+        BadRequestException
+      );
+    });
   });
 });

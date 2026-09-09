@@ -91,6 +91,25 @@ export class QueriesService {
     if (query.status !== "SENT") {
       throw new BadRequestException(`cannot respond to a query in status ${query.status}`);
     }
+    // Fourth instance of the same bug class as create()/send()'s guards
+    // above (see docs/TEST_REPORT.md) — found by direct experiment, not
+    // manual testing: under normal sequential use a SENT/RESPONDED query
+    // can never coexist with a FINALIZED/QA_REVIEW encounter, because
+    // finalize()'s own business rule refuses to finalize while any query is
+    // still open. But that invariant is a TOCTOU race, not a guarantee:
+    // create()+send() can both pass their own encounter-status checks
+    // between finalize()'s openQueryCount read and its transaction commit,
+    // leaving a SENT query on an encounter that finishes finalizing (and is
+    // then possibly QA-sampled) around it. Without this guard, respond()
+    // would let a provider answer a query on a chart already handed to an
+    // auditor, and — more dangerously — resolve() below would go on to
+    // silently overwrite QA_REVIEW back to IN_PROGRESS, discarding the
+    // auditor's active review. Confirmed by direct experiment: forcing
+    // exactly that state reproduced both every time before this guard
+    // existed.
+    if (query.encounter.status === "FINALIZED" || query.encounter.status === "QA_REVIEW") {
+      throw new BadRequestException(`cannot respond to a query on an encounter in status ${query.encounter.status}`);
+    }
     if (response.trim().length === 0) {
       throw new BadRequestException("response cannot be empty");
     }
@@ -104,6 +123,14 @@ export class QueriesService {
     const query = await this.assertQueryExists(queryId, facilityId);
     if (query.status !== "RESPONDED") {
       throw new BadRequestException(`cannot resolve a query in status ${query.status}`);
+    }
+    // Same guard and same reason as respond() above — the specific,
+    // confirmed consequence for resolve() is worse: resolving the last open
+    // query unconditionally sets the encounter to IN_PROGRESS below, which
+    // would silently end an auditor's active QA_REVIEW (or un-finalize a
+    // FINALIZED encounter) out from under them.
+    if (query.encounter.status === "FINALIZED" || query.encounter.status === "QA_REVIEW") {
+      throw new BadRequestException(`cannot resolve a query on an encounter in status ${query.encounter.status}`);
     }
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.query.update({
