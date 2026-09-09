@@ -110,6 +110,27 @@ export class CodingService {
       throw new BadRequestException(`cannot finalize an encounter in status ${encounter.status}`);
     }
 
+    // Business-rule decision (not a bug fix like the guard above — this is
+    // a deliberate product choice, made explicitly rather than inferred):
+    // an encounter cannot be finalized while any query on it is still
+    // open. Deliberately checks the actual Query rows (DRAFT/SENT/
+    // RESPONDED), not the encounter's derived QUERY_PENDING status — the
+    // real invariant is about unresolved queries, not the status field
+    // that happens to reflect them today; checking the rows directly also
+    // means this stays correct even if encounter.status were ever wrong
+    // (e.g. a future bug leaving it at IN_PROGRESS while a query is still
+    // open). RESPONDED (not just DRAFT/SENT) is included on purpose: a
+    // provider's response can contain documentation that changes the
+    // coding decision, and the coder hasn't reviewed/resolved it yet.
+    const openQueryCount = await this.prisma.query.count({
+      where: { encounterId, status: { in: ["DRAFT", "SENT", "RESPONDED"] } },
+    });
+    if (openQueryCount > 0) {
+      throw new BadRequestException(
+        `cannot finalize an encounter with ${openQueryCount} unresolved ${openQueryCount === 1 ? "query" : "queries"}`
+      );
+    }
+
     const diagnoses = codingDecision.diagnoses as unknown as CodedDiagnosis[];
     const procedures = codingDecision.procedures as unknown as CodedProcedure[];
     const drgResult = await this.grouperService.assignDrg(diagnoses, procedures);

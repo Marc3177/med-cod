@@ -5,9 +5,11 @@ import { ReferencePrismaService } from "../../prisma/reference-prisma.service.js
 import { GrouperService } from "../grouper/grouper.service.js";
 import { QaService } from "../qa/qa.service.js";
 import { CodingService } from "./coding.service.js";
+import { QueriesService } from "../queries/queries.service.js";
 import { createTestEncounter, deleteTestEncounter, TEST_FACILITY_ID } from "../../test-support/encounter-fixture.js";
 
 const TEST_USER_ID = 1;
+const PROVIDER_ID = 2;
 const CODE_VERSION = "2026";
 
 /**
@@ -23,6 +25,7 @@ describe("CodingService", () => {
   const grouper = new GrouperService(referencePrisma);
   const qa = new QaService(appPrisma);
   const service = new CodingService(appPrisma, referencePrisma, grouper, qa);
+  const queriesService = new QueriesService(appPrisma);
 
   const encounterIds: number[] = [];
 
@@ -361,6 +364,109 @@ describe("CodingService", () => {
       await expect(
         service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID + 999)
       ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+  });
+
+  /**
+   * Business-rule decision, not a bug fix: "an encounter cannot be
+   * finalized while any query on it is open" (DRAFT/SENT/RESPONDED).
+   * Deliberately checks the real Query rows, not the encounter's derived
+   * QUERY_PENDING status — see the comment on the guard itself for why.
+   * RESPONDED counts as open on purpose: a provider's answer can change
+   * the coding decision, and the coder hasn't resolved/reviewed it yet.
+   */
+  describe("finalize — business rule: no open queries", () => {
+    async function seedWithSavedDraft(): Promise<number> {
+      const encounterId = await seed();
+      await service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, decision(encounterId));
+      return encounterId;
+    }
+
+    it("rejects finalize when a query is still DRAFT", async () => {
+      const encounterId = await seedWithSavedDraft();
+      await queriesService.create(encounterId, TEST_USER_ID, TEST_FACILITY_ID, "Clarify pneumonia etiology?");
+
+      await expect(service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID)).rejects.toBeInstanceOf(
+        BadRequestException
+      );
+    });
+
+    it("rejects finalize when a query is SENT (unanswered)", async () => {
+      const encounterId = await seedWithSavedDraft();
+      const query = await queriesService.create(encounterId, TEST_USER_ID, TEST_FACILITY_ID, "Clarify?");
+      await queriesService.send(query.id, TEST_FACILITY_ID);
+
+      await expect(service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID)).rejects.toBeInstanceOf(
+        BadRequestException
+      );
+    });
+
+    it("rejects finalize when a query is RESPONDED but not yet resolved by the coder", async () => {
+      const encounterId = await seedWithSavedDraft();
+      const query = await queriesService.create(encounterId, TEST_USER_ID, TEST_FACILITY_ID, "Clarify?");
+      await queriesService.send(query.id, TEST_FACILITY_ID);
+      await queriesService.respond(query.id, PROVIDER_ID, TEST_FACILITY_ID, "It's aspiration pneumonia.");
+
+      await expect(service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID)).rejects.toBeInstanceOf(
+        BadRequestException
+      );
+    });
+
+    it("allows finalize once the query has been resolved", async () => {
+      const encounterId = await seedWithSavedDraft();
+      const query = await queriesService.create(encounterId, TEST_USER_ID, TEST_FACILITY_ID, "Clarify?");
+      await queriesService.send(query.id, TEST_FACILITY_ID);
+      await queriesService.respond(query.id, PROVIDER_ID, TEST_FACILITY_ID, "It's aspiration pneumonia.");
+      await queriesService.resolve(query.id, TEST_USER_ID, TEST_FACILITY_ID);
+
+      await expect(service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID)).resolves.toBeDefined();
+    });
+
+    it("rejects finalize when one of several queries is still open, even if the others are resolved", async () => {
+      const encounterId = await seedWithSavedDraft();
+      const resolvedQuery = await queriesService.create(encounterId, TEST_USER_ID, TEST_FACILITY_ID, "Question A?");
+      await queriesService.send(resolvedQuery.id, TEST_FACILITY_ID);
+      await queriesService.respond(resolvedQuery.id, PROVIDER_ID, TEST_FACILITY_ID, "Answer A.");
+      await queriesService.resolve(resolvedQuery.id, TEST_USER_ID, TEST_FACILITY_ID);
+
+      await queriesService.create(encounterId, TEST_USER_ID, TEST_FACILITY_ID, "Question B?");
+      // left as DRAFT — still open
+
+      await expect(service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID)).rejects.toBeInstanceOf(
+        BadRequestException
+      );
+    });
+
+    it("allows finalize once every query on the encounter is resolved", async () => {
+      const encounterId = await seedWithSavedDraft();
+      const queryA = await queriesService.create(encounterId, TEST_USER_ID, TEST_FACILITY_ID, "Question A?");
+      const queryB = await queriesService.create(encounterId, TEST_USER_ID, TEST_FACILITY_ID, "Question B?");
+      await queriesService.send(queryA.id, TEST_FACILITY_ID);
+      await queriesService.send(queryB.id, TEST_FACILITY_ID);
+      await queriesService.respond(queryA.id, PROVIDER_ID, TEST_FACILITY_ID, "Answer A.");
+      await queriesService.respond(queryB.id, PROVIDER_ID, TEST_FACILITY_ID, "Answer B.");
+      await queriesService.resolve(queryA.id, TEST_USER_ID, TEST_FACILITY_ID);
+      await queriesService.resolve(queryB.id, TEST_USER_ID, TEST_FACILITY_ID);
+
+      await expect(service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID)).resolves.toBeDefined();
+    });
+
+    it("does not mutate encounter or coding-decision state when finalize is rejected for an open query", async () => {
+      const encounterId = await seedWithSavedDraft();
+      await queriesService.create(encounterId, TEST_USER_ID, TEST_FACILITY_ID, "Clarify?");
+
+      const encounterBefore = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      const codingBefore = await appPrisma.codingDecision.findUniqueOrThrow({ where: { encounterId } });
+
+      await expect(service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID)).rejects.toBeInstanceOf(
+        BadRequestException
+      );
+
+      const encounterAfter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      const codingAfter = await appPrisma.codingDecision.findUniqueOrThrow({ where: { encounterId } });
+      expect(encounterAfter.status).toBe(encounterBefore.status);
+      expect(codingAfter.finalizedAt).toBe(codingBefore.finalizedAt);
+      expect(codingAfter.updatedAt).toEqual(codingBefore.updatedAt);
     });
   });
 });
