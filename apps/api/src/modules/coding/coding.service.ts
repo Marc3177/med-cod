@@ -136,6 +136,32 @@ export class CodingService {
     const drgResult = await this.grouperService.assignDrg(diagnoses, procedures);
 
     const updated = await this.prisma.$transaction(async (tx) => {
+      // Race found by genuine-concurrency testing (Promise.all of two real
+      // finalize() calls against the same encounter, not a constructed
+      // state): the "already finalized" check above reads encounter.status
+      // in a separate query, before this transaction starts — two
+      // concurrent finalize() calls can both read IN_PROGRESS and both pass
+      // that check before either commits, producing two FINALIZE audit
+      // entries (and, worse, two independent maybeSampleForReview() calls
+      // that could each sample and create their own QaReview). This
+      // violates the exact invariant the sequential guard above already
+      // establishes ("cannot finalize an already-finalized encounter"), so
+      // it's a bug under that invariant, not a new business decision.
+      // Fixed with a conditional update as the transaction's first
+      // operation: updateMany's WHERE clause (status not already
+      // FINALIZED/QA_REVIEW) is evaluated atomically by Postgres as part of
+      // the single UPDATE statement, so exactly one concurrent caller can
+      // ever flip it — the loser's count is 0, and it aborts the whole
+      // transaction before writing anything, the same way the pre-check
+      // above rejects the sequential case.
+      const lockResult = await tx.encounter.updateMany({
+        where: { id: encounterId, status: { notIn: ["FINALIZED", "QA_REVIEW"] } },
+        data: { status: "FINALIZED" },
+      });
+      if (lockResult.count === 0) {
+        throw new BadRequestException("cannot finalize an encounter in status FINALIZED or QA_REVIEW");
+      }
+
       const result = await tx.codingDecision.update({
         where: { encounterId },
         data: {
@@ -153,11 +179,6 @@ export class CodingService {
           action: "FINALIZE",
           after: { diagnoses: codingDecision.diagnoses, procedures: codingDecision.procedures },
         },
-      });
-
-      await tx.encounter.update({
-        where: { id: encounterId },
-        data: { status: "FINALIZED" },
       });
 
       return result;

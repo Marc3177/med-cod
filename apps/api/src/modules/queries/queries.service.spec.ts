@@ -449,4 +449,54 @@ describe("QueriesService", () => {
       );
     });
   });
+
+  /**
+   * Full workflow adversarial matrix, Phase 5 (failure injection) — see
+   * docs/TEST_REPORT.md's "P0 Workflow Contract Matrix". Same technique
+   * proven in coding.service.spec.ts's transaction-atomicity tests: a
+   * Prisma `$extends` query interceptor forces a real failure partway
+   * through send()'s and resolve()'s own `$transaction(async (tx) => ...)`
+   * blocks, confirming neither leaves a partial write.
+   */
+  describe("send/resolve — transaction atomicity under failure injection", () => {
+    it("send() leaves the query DRAFT and the encounter untouched when its transaction fails", async () => {
+      const encounterId = await seed();
+      const query = await service.create(encounterId, CODER_ID, TEST_FACILITY_ID, "Question?");
+
+      const poisoned = appPrisma.$extends({
+        query: { encounter: { async update() { throw new Error("SIMULATED_FAILURE"); } } },
+      });
+      const poisonedService = new QueriesService(poisoned as unknown as AppPrismaService);
+
+      await expect(poisonedService.send(query.id, TEST_FACILITY_ID)).rejects.toThrow("SIMULATED_FAILURE");
+
+      const queryAfter = await appPrisma.query.findUniqueOrThrow({ where: { id: query.id } });
+      const encounterAfter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(queryAfter.status).toBe("DRAFT");
+      expect(queryAfter.sentAt).toBeNull();
+      expect(encounterAfter.status).toBe("NEW");
+    });
+
+    it("resolve() leaves the query RESPONDED and the encounter untouched when its transaction fails", async () => {
+      const encounterId = await seed();
+      const query = await service.create(encounterId, CODER_ID, TEST_FACILITY_ID, "Question?");
+      await service.send(query.id, TEST_FACILITY_ID);
+      await service.respond(query.id, PROVIDER_ID, TEST_FACILITY_ID, "An answer.");
+
+      const poisoned = appPrisma.$extends({
+        query: { encounter: { async update() { throw new Error("SIMULATED_FAILURE"); } } },
+      });
+      const poisonedService = new QueriesService(poisoned as unknown as AppPrismaService);
+
+      await expect(poisonedService.resolve(query.id, CODER_ID, TEST_FACILITY_ID)).rejects.toThrow(
+        "SIMULATED_FAILURE"
+      );
+
+      const queryAfter = await appPrisma.query.findUniqueOrThrow({ where: { id: query.id } });
+      const encounterAfter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(queryAfter.status).toBe("RESPONDED");
+      expect(queryAfter.resolvedAt).toBeNull();
+      expect(encounterAfter.status).toBe("QUERY_PENDING");
+    });
+  });
 });

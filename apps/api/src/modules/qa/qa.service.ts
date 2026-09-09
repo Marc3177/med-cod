@@ -50,10 +50,22 @@ export class QaService {
       throw new BadRequestException(`cannot approve a review in status ${review.status}`);
     }
     return this.prisma.$transaction(async (tx) => {
-      const updated = await tx.qaReview.update({
-        where: { id: reviewId },
+      // Race found by genuine-concurrency testing (two real approve() calls
+      // fired together against the same review, not a constructed state):
+      // the PENDING check above reads in a separate query before this
+      // transaction starts, so two concurrent approve() calls could both
+      // pass it and both "succeed" — the same invariant violation as the
+      // finalize()/finalize() race (see coding.service.ts), fixed the same
+      // way: a conditional updateMany as the transaction's first write,
+      // whose WHERE clause Postgres evaluates atomically, so only the
+      // caller that actually wins the race proceeds.
+      const lockResult = await tx.qaReview.updateMany({
+        where: { id: reviewId, status: "PENDING" },
         data: { status: "APPROVED", reviewedById, reviewedAt: new Date() },
       });
+      if (lockResult.count === 0) {
+        throw new BadRequestException("cannot approve a review that is no longer PENDING");
+      }
       // Sampling moved the encounter to QA_REVIEW (see maybeSampleForReview)
       // — approval restores it to FINALIZED, the state it was actually in
       // before sampling picked it up.
@@ -61,7 +73,7 @@ export class QaService {
         where: { id: review.encounterId },
         data: { status: "FINALIZED" },
       });
-      return updated;
+      return tx.qaReview.findUniqueOrThrow({ where: { id: reviewId } });
     });
   }
 
@@ -75,15 +87,19 @@ export class QaService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      const updated = await tx.qaReview.update({
-        where: { id: reviewId },
+      // Same race and same fix as approve() above.
+      const lockResult = await tx.qaReview.updateMany({
+        where: { id: reviewId, status: "PENDING" },
         data: { status: "RETURNED", reason, reviewedById, reviewedAt: new Date() },
       });
+      if (lockResult.count === 0) {
+        throw new BadRequestException("cannot return a review that is no longer PENDING");
+      }
       await tx.encounter.update({
         where: { id: review.encounterId },
         data: { status: "IN_PROGRESS" },
       });
-      return updated;
+      return tx.qaReview.findUniqueOrThrow({ where: { id: reviewId } });
     });
   }
 

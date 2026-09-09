@@ -117,9 +117,12 @@ regression of the same bug.
 Thirteen spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
 covering the modules whose bugs were the most subtle this project found, plus the P0
 data-integrity invariants, workflow state machines, facility-isolation surface,
-transaction atomicity, cross-service Query/QA ownership, and cross-module
-authorization (auth/role/facility boundaries at the guard layer) around the core
-coding write path:
+transaction atomicity, cross-service Query/QA ownership, cross-module authorization
+(auth/role/facility boundaries at the guard layer), and — the final P0 gate — the full
+workflow adversarial matrix (TOCTOU races found by genuine concurrent execution, not
+just constructed state) around the core coding write path. See docs/TEST_REPORT.md's
+"P0 Workflow Contract Matrix" for the definitive state × operation reference this
+whole effort was building toward.
 
 - `src/modules/suggestions/suggestions.service.spec.ts` — COPD-with-exacerbation, the
   "specified"/"from" word-filter fixes, the "Erb's, disease" false-positive guard,
@@ -256,6 +259,23 @@ since-deleted encounter's facility relation instead of tracking the patient ID d
 See TEST_REPORT.md for the full account; the fix generalizes to "track everything an
 `afterEach` needs to delete directly, never re-derive it after an earlier delete in the
 same cleanup may have already removed the path to it."
+
+The full workflow adversarial matrix phase (see TEST_REPORT.md) added a new technique
+to the toolbox: **genuine-concurrency testing**, distinct from the constructed-state
+testing used everywhere else in this project. Rather than manually setting a row's
+status to simulate an "impossible via the API" state, `Promise.allSettled([serviceCall(),
+serviceCall()])` fires two real async calls against the same row and lets Node's event
+loop and Postgres's real transaction handling produce whatever interleaving actually
+occurs. This is how the `finalize()`×`finalize()` and `approve()`/`returnToCoder()`×
+themselves TOCTOU races were found — constructed-state testing could show the *result*
+of a bad interleaving but not prove one was actually reachable; genuine-concurrency
+testing proved it directly. Both bug classes were fixed with the same pattern: a
+conditional `updateMany` (`where` including the expected prior status) as the first
+write inside the transaction, so Postgres evaluates the guard atomically as part of the
+single `UPDATE` rather than as a separate read-then-write with a gap in between.
+Teeth-proofed the same way as every other fix in this project: revert to the naive
+`update()`, confirm the exact regression test fails with the predicted symptom (two
+fulfilled promises instead of one), restore, confirm green.
 
 Every one of these suites was verified to have real teeth, not just pass by
 construction, the same way: temporarily revert the real fix in the source file (exact

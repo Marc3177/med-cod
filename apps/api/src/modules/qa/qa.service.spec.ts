@@ -298,4 +298,107 @@ describe("QaService", () => {
       expect(encounter.status).toBe("QA_REVIEW");
     });
   });
+
+  /**
+   * Full workflow adversarial matrix, Phase 4 (TOCTOU races) — see
+   * docs/TEST_REPORT.md's "P0 Workflow Contract Matrix". Same class and
+   * same fix as the finalize()/finalize() race in coding.service.ts: the
+   * PENDING check reads in a separate query before the transaction starts,
+   * so two genuinely concurrent calls could both pass it. A violation of
+   * the already-established sequential invariant ("rejects approve()/
+   * returnToCoder() on a review that is already APPROVED/RETURNED", tested
+   * above), so a BUG under that invariant. Fixed with a conditional
+   * `updateMany` as each transaction's first write.
+   */
+  describe("approve/returnToCoder — concurrent-request race (TOCTOU)", () => {
+    it("exactly one of two truly concurrent approve() calls on the same review succeeds", async () => {
+      const encounterId = await seed();
+      const review = await seedPendingReview(encounterId);
+
+      const results = await Promise.allSettled([
+        service.approve(review.id, AUDITOR_ID, TEST_FACILITY_ID),
+        service.approve(review.id, AUDITOR_ID, TEST_FACILITY_ID),
+      ]);
+
+      const fulfilled = results.filter((r) => r.status === "fulfilled");
+      const rejected = results.filter((r) => r.status === "rejected");
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(BadRequestException);
+
+      const finalReview = await appPrisma.qaReview.findUniqueOrThrow({ where: { id: review.id } });
+      expect(finalReview.status).toBe("APPROVED");
+      const encounter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(encounter.status).toBe("FINALIZED");
+    });
+
+    it("exactly one of two truly concurrent returnToCoder() calls on the same review succeeds", async () => {
+      const encounterId = await seed();
+      const review = await seedPendingReview(encounterId);
+
+      const results = await Promise.allSettled([
+        service.returnToCoder(review.id, AUDITOR_ID, TEST_FACILITY_ID, "Reason A"),
+        service.returnToCoder(review.id, AUDITOR_ID, TEST_FACILITY_ID, "Reason B"),
+      ]);
+
+      const fulfilled = results.filter((r) => r.status === "fulfilled");
+      const rejected = results.filter((r) => r.status === "rejected");
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(BadRequestException);
+
+      const finalReview = await appPrisma.qaReview.findUniqueOrThrow({ where: { id: review.id } });
+      expect(finalReview.status).toBe("RETURNED");
+      const encounter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(encounter.status).toBe("IN_PROGRESS");
+    });
+  });
+
+  /**
+   * Full workflow adversarial matrix, Phase 5 (failure injection) — see
+   * docs/TEST_REPORT.md's "P0 Workflow Contract Matrix". Same `$extends`
+   * technique used throughout this pass, applied to approve()'s and
+   * returnToCoder()'s own transactions.
+   */
+  describe("approve/returnToCoder — transaction atomicity under failure injection", () => {
+    it("approve() leaves the review PENDING and the encounter in QA_REVIEW when its transaction fails", async () => {
+      const encounterId = await seed();
+      const review = await seedPendingReview(encounterId);
+
+      const poisoned = appPrisma.$extends({
+        query: { encounter: { async update() { throw new Error("SIMULATED_FAILURE"); } } },
+      });
+      const poisonedService = new QaService(poisoned as unknown as AppPrismaService);
+
+      await expect(poisonedService.approve(review.id, AUDITOR_ID, TEST_FACILITY_ID)).rejects.toThrow(
+        "SIMULATED_FAILURE"
+      );
+
+      const reviewAfter = await appPrisma.qaReview.findUniqueOrThrow({ where: { id: review.id } });
+      const encounterAfter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(reviewAfter.status).toBe("PENDING");
+      expect(reviewAfter.reviewedAt).toBeNull();
+      expect(encounterAfter.status).toBe("QA_REVIEW");
+    });
+
+    it("returnToCoder() leaves the review PENDING and the encounter in QA_REVIEW when its transaction fails", async () => {
+      const encounterId = await seed();
+      const review = await seedPendingReview(encounterId);
+
+      const poisoned = appPrisma.$extends({
+        query: { encounter: { async update() { throw new Error("SIMULATED_FAILURE"); } } },
+      });
+      const poisonedService = new QaService(poisoned as unknown as AppPrismaService);
+
+      await expect(
+        poisonedService.returnToCoder(review.id, AUDITOR_ID, TEST_FACILITY_ID, "Reason")
+      ).rejects.toThrow("SIMULATED_FAILURE");
+
+      const reviewAfter = await appPrisma.qaReview.findUniqueOrThrow({ where: { id: review.id } });
+      const encounterAfter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(reviewAfter.status).toBe("PENDING");
+      expect(reviewAfter.reason).toBeNull();
+      expect(encounterAfter.status).toBe("QA_REVIEW");
+    });
+  });
 });

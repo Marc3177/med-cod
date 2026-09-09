@@ -712,4 +712,89 @@ describe("CodingService", () => {
       expect(qaReviews).toHaveLength(0); // sampling's own transaction rolled back correctly
     });
   });
+
+  /**
+   * Full workflow adversarial matrix, Phase 4 (TOCTOU races) — see
+   * docs/TEST_REPORT.md's "P0 Workflow Contract Matrix". Found by genuine
+   * concurrency (Promise.allSettled of two real finalize() calls), not a
+   * constructed state: the "already finalized" guard reads encounter.status
+   * in its own query before the transaction starts, so two concurrent
+   * calls could both read IN_PROGRESS and both pass — this is a violation
+   * of the already-established sequential invariant ("rejects finalizing an
+   * encounter that is already finalized", tested above), so it's a BUG
+   * under that invariant, not a new business decision. Fixed with a
+   * conditional `updateMany` as the transaction's first write — its WHERE
+   * clause is evaluated atomically by Postgres, so only one of any number
+   * of concurrent callers can ever win.
+   */
+  describe("finalize — concurrent-request race (TOCTOU)", () => {
+    it("exactly one of two truly concurrent finalize() calls succeeds; exactly one FINALIZE audit entry is written", async () => {
+      const encounterId = await seed();
+      await service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, decision(encounterId));
+
+      const results = await Promise.allSettled([
+        service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID),
+        service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID),
+      ]);
+
+      const fulfilled = results.filter((r) => r.status === "fulfilled");
+      const rejected = results.filter((r) => r.status === "rejected");
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(BadRequestException);
+
+      const codingDecision = await appPrisma.codingDecision.findUniqueOrThrow({ where: { encounterId } });
+      const auditEntries = await appPrisma.auditEntry.findMany({
+        where: { codingDecisionId: codingDecision.id, action: "FINALIZE" },
+      });
+      expect(auditEntries).toHaveLength(1);
+
+      const encounter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(["FINALIZED", "QA_REVIEW"]).toContain(encounter.status);
+    });
+  });
+
+  /**
+   * Full workflow adversarial matrix, Phase 1/3 — see docs/TEST_REPORT.md's
+   * "P0 Workflow Contract Matrix". saveDraft() is allowed while
+   * QUERY_PENDING (only FINALIZED/QA_REVIEW are blocked) and unconditionally
+   * sets encounter.status back to IN_PROGRESS — so calling it while a query
+   * is still SENT/RESPONDED silently makes the encounter's derived status
+   * say "IN_PROGRESS" even though a query is genuinely still open. This is
+   * NOT classified as a bug: finalize()'s open-query business rule already
+   * checks the real Query rows directly, not the derived status (see its
+   * own comment, written before this test existed, anticipating exactly
+   * this case) — so this test exists to actually prove that anticipation
+   * holds, not just assert the (arguably confusing) status flip in
+   * isolation.
+   */
+  describe("saveDraft while QUERY_PENDING — encounter.status can drift, but finalize() stays safe", () => {
+    it("saveDraft() flips the encounter's derived status to IN_PROGRESS even while a query is SENT, but finalize() still correctly rejects on the real open query", async () => {
+      const encounterId = await seed();
+      await service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, decision(encounterId));
+      const query = await queriesService.create(encounterId, TEST_USER_ID, TEST_FACILITY_ID, "Clarify?");
+      await queriesService.send(query.id, TEST_FACILITY_ID);
+      const beforeSaveDraft = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(beforeSaveDraft.status).toBe("QUERY_PENDING");
+
+      await service.saveDraft(
+        encounterId,
+        TEST_USER_ID,
+        TEST_FACILITY_ID,
+        decision(encounterId, {
+          diagnoses: [{ code: "N179", codeSystem: "ICD-10-CM", codeVersion: CODE_VERSION, role: "principal", presentOnAdmission: true }],
+        })
+      );
+
+      const afterSaveDraft = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(afterSaveDraft.status).toBe("IN_PROGRESS"); // the derived status drifted — documented, not a bug in itself
+
+      await expect(service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID)).rejects.toBeInstanceOf(
+        BadRequestException
+      ); // ...but finalize() checks the real Query row, so it's still correctly blocked
+
+      const query2 = await appPrisma.query.findUniqueOrThrow({ where: { id: query.id } });
+      expect(query2.status).toBe("SENT");
+    });
+  });
 });
