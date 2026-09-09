@@ -243,4 +243,45 @@ describe("SuggestionsService", () => {
       ForbiddenException
     );
   });
+
+  /**
+   * Regression: EVALUATION_HARNESS.md Fix #2 — the P1-E0 evaluation
+   * baseline's confirmed numeric_qualifiers_staging gap.
+   * MIN_SIGNIFICANT_WORD_LENGTH silently dropped standalone digits, so
+   * "chronic kidney disease, stage 3" also suggested every other CKD
+   * stage (1, 2, 4, 5) alongside the correct one, because the digit that
+   * should have distinguished them was never actually required.
+   */
+  it("does not suggest every other CKD stage when only one stage is documented", async () => {
+    const encounterId = await seed([
+      { type: "DISCHARGE_SUMMARY", content: "Patient has chronic kidney disease, stage 3." },
+    ]);
+
+    const suggestions = await service.listSuggestions(encounterId, TEST_FACILITY_ID);
+    const codes = suggestions.map((s) => s.code);
+
+    expect(codes).toContain("N1830");
+    expect(codes).not.toContain("N181");
+    expect(codes).not.toContain("N182");
+    expect(codes).not.toContain("N184");
+    expect(codes).not.toContain("N185");
+  });
+
+  /**
+   * Same fix, different consequence: "Type 1" and "Type 2" diabetes
+   * entries collapsed together for the same reason — the digit
+   * distinguishing them was dropped, so any diabetes mention suggested
+   * both types regardless of which one the documentation actually named.
+   */
+  it("does not suggest Type 1 diabetes when the documentation says Type 2", async () => {
+    const encounterId = await seed([
+      { type: "DISCHARGE_SUMMARY", content: "Type 2 diabetes mellitus, well controlled on metformin." },
+    ]);
+
+    const suggestions = await service.listSuggestions(encounterId, TEST_FACILITY_ID);
+    const codes = suggestions.map((s) => s.code);
+
+    expect(codes).toContain("E119");
+    expect(codes).not.toContain("E109");
+  });
 });

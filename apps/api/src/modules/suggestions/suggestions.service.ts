@@ -461,15 +461,34 @@ function groupsSatisfied(groups: string[][], sentenceWords: Set<string>): boolea
   return groups.every((group) => group.some((w) => sentenceWords.has(w)));
 }
 
+/** A token made entirely of digits — "1", "3", "5"... never a stopword or
+ *  generic-medical word, and unlike a short English word (see
+ *  hasHiddenShortWord below), never ambiguous: a "3" in "stage 3" always
+ *  means stage 3, not something else that happens to be short. */
+function isNumericQualifier(w: string): boolean {
+  return /^\d+$/.test(w);
+}
+
 /**
  * The significant words of a term, grouped so that members of the same
  * SYNONYM_CLUSTERS entry sit together (an OR-requirement) while everything
  * else stays its own single-word group (an AND-requirement, same as
  * before). Order doesn't matter for matching, only group membership.
+ *
+ * Found by the P1-E0 evaluation harness (docs/EVALUATION_HARNESS.md,
+ * Fix #2), not guessed: MIN_SIGNIFICANT_WORD_LENGTH=4 silently dropped
+ * standalone digits as "too short," so every numerically-staged condition
+ * (CKD stage 1-5, retinopathy-of-prematurity stage 0-5, diabetes Type 1 vs
+ * Type 2, pressure-ulcer stages, necrotizing-enterocolitis stages...)
+ * collapsed to "any stage/type matches," confirmed at scale: 940 of 63,138
+ * FY2026 index entries carry a standalone digit. Digits are exempted from
+ * the length filter here — unlike a short English word (which might
+ * legitimately be dropped as ambiguous, see hasHiddenShortWord), a digit
+ * is never ambiguous: "3" always means exactly stage/type 3.
  */
 function significantWordGroups(term: string): string[][] {
   const words = tokenizeWords(term.toLowerCase())
-    .filter((w) => w.length >= MIN_SIGNIFICANT_WORD_LENGTH)
+    .filter((w) => w.length >= MIN_SIGNIFICANT_WORD_LENGTH || isNumericQualifier(w))
     .filter((w) => !GENERIC_MEDICAL_WORDS.has(w) && !CONNECTOR_WORDS.has(w));
 
   const groups: string[][] = [];

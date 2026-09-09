@@ -95,6 +95,7 @@ Raw results for each experiment are kept as JSON snapshots in `apps/api/src/eval
 |---|---:|---:|---:|---:|---:|---:|---|
 | Baseline | 73.5% | 59.0% | 36 | 13 | 25 | 14 | — |
 | **Fix #1** (`respiration`/`respiratory` cluster) | **77.6%** | **60.3%** | 38 | 11 | 25 | 14 | **0** |
+| **Fix #2** (numeric-qualifier digit preservation) | **77.6%** | **69.1%** | 38 | 11 | 17 | 22 | **0** |
 
 ### Fix #1 — SHIPPED
 
@@ -112,6 +113,27 @@ Raw results for each experiment are kept as JSON snapshots in `apps/api/src/eval
 
 `abbr-10` (the MI abbreviation case) and `temp-01` (MI history) remain unchanged FN, as predicted — they depend on the separate, not-yet-shipped `infarct`/`infarction`/`myocardium`/`myocardial` cluster (Fix #3), not this one.
 
-### Fix #2 and Fix #3 — not yet run
+### Fix #2 — SHIPPED
+
+**Change:** in `significantWordGroups()`, exempted standalone-digit tokens from the `MIN_SIGNIFICANT_WORD_LENGTH` filter (`.filter((w) => w.length >= MIN_SIGNIFICANT_WORD_LENGTH || isNumericQualifier(w))`) — the confirmed root cause of the numeric-staging gap: a "3" was being silently dropped as "too short," so every stage of CKD (and every other digit-differentiated condition) collapsed to "any stage matches."
+
+**Exact case-level diff against Fix #1** (computed the same way, diffing outcome-by-outcome, this time also diffing each case's unannotated "extra suggestions" list since this fix's real reach turned out to extend beyond the annotated categories):
+
+- `num-01`: `N181`/`N182`/`N184`/`N185` FP → **TN** (4 cases)
+- `num-02`: `N181`/`N182`/`N1830`/`N184` FP → **TN** (4 cases)
+- **Unplanned bonus, caught only by diffing the unannotated extras**: `syn-03`, `temp-04`, and `multi-01` each stopped returning `E10.9` (Type 1 diabetes) as noise alongside the correct `E11.9` (Type 2) — the exact same digit-dropping bug was also silently collapsing "Type 1" and "Type 2" diabetes entries together, in cases that were never in the `numeric_qualifiers_staging` category at all.
+- `abbr-05`, `avc-02`, `avc-03`: the same CKD-stage noise (`N181`/`N182`/`N184`/`N185`) disappeared from their extras lists too, even though none of these cases had declared it as a formal `expectedNonMatches` — real precision improvement the original annotation didn't even ask for.
+- **Every other one of the 88 annotated code checks, and every other case's extras list: unchanged. Zero new false positives introduced anywhere** — every diff was a removal, never an addition.
+- `num-03`/`num-04` (pressure ulcers) remain unchanged FN, exactly as predicted — that gap is the separate, more severe ulcer-cluster-unmatchable issue documented in the baseline, not the digit-dropping bug this fix targets.
+
+**Decision:** ship — an even cleaner case than Fix #1. `numeric_qualifiers_staging` precision went from 0.20 to **1.00** (FP 8→0, TN 3→11) with recall unchanged (the two genuinely-unrelated pressure-ulcer failures correctly remain FN, not silently masked). Two new permanent regression tests added (CKD-stage specificity; the Type-1-vs-Type-2 diabetes collision this fix incidentally also closed), both teeth-proofed by reverting the filter change and confirming the exact predicted failure (`expected [ Array(9) ] to not include 'N181'`; `expected [ 'E119', 'E139', 'E109' ] to not include 'E109'`), then restored.
+
+**Verification:** `npm test` 153/153 (151 + 2 new tests). Zero leftover test data.
+
+### Fix #3 — not yet run
 
 Per the controlled-experiment plan, negation is deliberately excluded from the next simple terminology fixes and reserved for its own dedicated experiment — it's a semantically different problem (context/scope modeling) from a missing synonym cluster or a dropped numeric qualifier, and deserves to be measured on its own rather than folded into a "terminology improvements" bucket.
+
+### After Fix #1 + Fix #2 + Fix #3 — combined run not yet performed
+
+Per the plan, the three fixes are combined and re-evaluated together only after each has been verified in isolation.
