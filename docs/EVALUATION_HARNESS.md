@@ -97,6 +97,26 @@ Raw results for each experiment are kept as JSON snapshots in `apps/api/src/eval
 | **Fix #1** (`respiration`/`respiratory` cluster) | **77.6%** | **60.3%** | 38 | 11 | 25 | 14 | **0** |
 | **Fix #2** (numeric-qualifier digit preservation) | **77.6%** | **69.1%** | 38 | 11 | 17 | 22 | **0** |
 | **Fix #3** (MI `infarct`/`myocardial` two-cluster) | **81.6%** | 67.8% | 40 | 9 | 19 | 20 | **2 (both anticipated, see below)** |
+| **Combined** (Fix #1 + #2 + #3 together) | **81.6%** | 67.8% | 40 | 9 | 19 | 20 | **0 — see note below** |
+
+### A methodology note, stated plainly rather than glossed over
+
+**The "Combined" row above is not a new measurement — it is byte-identical to Fix #3's, confirmed by diffing every one of the 88 annotated outcomes and every case's unannotated extras: 0 changes.** This is expected, not a coincidence, and worth being explicit about why: each fix in this log was shipped *on top of* the previously-shipped one rather than reverted back to a clean baseline first. Fix #2's evaluation run already had Fix #1 present in the codebase; Fix #3's run already had both Fix #1 and Fix #2 present. In other words, **every row from Fix #2 onward in this table was already a cumulative measurement, not an isolated one** — "Fix #3" and "Combined" describe the exact same code state, because Fix #3 was never tested in isolation from Fix #1/#2 to begin with.
+
+This is a real deviation from a stricter protocol (revert-to-baseline before testing each fix independently, then combine only at the end), and it's recorded here rather than silently presented as if the combined run were a fresh, independent confirmation. It does not invalidate what was measured, though: cumulative sequential validation is itself a legitimate methodology for exactly the question the combined run exists to answer — cross-fix interaction. If Fix #3 had interacted badly with Fix #1 or Fix #2 (e.g., the MI clusters somehow re-exposing the CKD-staging false positives, or the digit-preservation change interacting with the new MI clusters to produce some new collision), that interaction would necessarily have shown up in the Fix #3 diff already, since Fix #1 and Fix #2 were already present in the codebase at that point. What this sequence does NOT establish is each fix's effect in true isolation *from each other* — Fix #2's own row describes "Fix #1 + Fix #2," not "Fix #2 alone from a clean baseline," and Fix #3's row describes all three together. A future evaluation wanting genuinely independent per-fix measurements would need to revert to baseline and re-apply each fix separately before combining — not done here, and not repeated retroactively for this round given the interaction question is already answered by the sequence as executed.
+
+**Delta classification for the combined run** (all categories from the requested classification scheme, reported even where empty, since an empty category is itself information):
+
+| Class | Count | Cases |
+|---|---:|---|
+| Cases improved | 0 | — (all improvements already occurred at Fix #1/#2/#3's own steps) |
+| Cases regressed | 0 | — |
+| Cases changed only because another fix exposed a masked problem | 0 | — (this happened once already, at the Fix #3 step itself: `neg-03`/`temp-01`, already classified and decided there) |
+| New false positives | 0 | — |
+| New false negatives | 0 | — |
+| Cross-fix interactions | 0 | — no evidence of any interaction between the three fixes, positive or negative |
+
+**Decision: the combined state is the new evaluation baseline.** 81.6% recall / 67.8% precision, up from 73.5%/59.0% at E0. No interaction regressions — because, per the methodology note above, the interaction question was already being answered incrementally at each step, and none of the three fixes' individual diffs showed any sign of touching a case outside its own stated target. `combined-detail.json`/`combined-summary.json` are saved alongside the other snapshots in `apps/api/src/evaluation/results/` for future reference, even though their content is identical to `fix3-*.json`.
 
 ### Fix #1 — SHIPPED
 
@@ -147,6 +167,10 @@ Raw results for each experiment are kept as JSON snapshots in `apps/api/src/eval
 
 **Verification:** `npm test` 155/155 (153 + 2 new tests: the intended MI-cluster regression test, and a dedicated test proving the two-cluster design choice — "myocardium" alone must not fire I21.9). Teeth-proofed twice: (1) removed both new cluster entries, confirmed the MI-match test fails with the exact predicted symptom; (2) merged them into a single naive four-way cluster instead of restoring the real fix, and confirmed the anatomical-language guard test fails exactly as the design rationale predicted (`expected [ 'I515', 'I219' ] to not include 'I219'`) — direct proof the two-cluster structure, not just "a" fix, is what's required. Zero leftover test data.
 
-### After Fix #1 + Fix #2 + Fix #3 — combined run not yet performed
+### Combined run — DONE, see the "Experiment log" table and methodology note above
 
-Per the plan, the three fixes are combined and re-evaluated together only after each has been verified in isolation. All three are now shipped individually; the combined run is the next step.
+Confirmed via a fresh `npm run evaluate` on the current codebase state (all three fixes present): 81.6% recall / 67.8% precision, zero delta from Fix #3 at the individual-case level (0 improved, 0 regressed, 0 newly-exposed, 0 new FP, 0 new FN, 0 cross-fix interactions) — expected given each fix was shipped cumulatively on top of the last, not re-isolated from a clean baseline (see the methodology note). This combined state is now the evaluation harness's baseline going forward.
+
+## Next: pausing matcher modifications
+
+Per explicit direction, no further terminology/index fixes are planned for now. The next area the harness's own findings point to — negation/temporal/context handling (`negation`, `temporal_context`, and the negation-shaped false positives inside `acute_vs_chronic`'s `avc-05` and `false_positive_traps`' `fp-06`) — is qualitatively different from a missing synonym cluster or a dropped index character: it's the first candidate for genuinely testing whether deterministic keyword matching has hit a representational ceiling, rather than just an incomplete-coverage gap. That question is deliberately not answered here.
