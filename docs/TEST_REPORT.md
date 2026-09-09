@@ -213,6 +213,18 @@ Formally recorded rather than left as a comment buried in prose — each of thes
 - **Not fixed because:** not yet individually verified against the real index for the same false-positive risk the ulcer cluster had (short co-occurring words that would collapse to over-broad matching). Every cluster added so far was checked one at a time — this one hasn't been yet.
 - **Required next step:** run the same isolated-segment / false-positive check used for the other four clusters (`infarct`/`infarction`, `myocardium`/`myocardial`) before adding them.
 
+### Finalize / QA sampling post-commit failure semantics
+
+- **Status:** OPEN — product decision required
+- **Severity:** P1
+- **Architecture change:** NO
+- **Current behavior:** `finalize()`'s main transaction commits successfully (coding decision persisted, `finalizedAt` persisted, MS-DRG persisted, `FINALIZE` audit entry persisted, encounter set to `FINALIZED`) — then `maybeSampleForReview()` runs as a separate post-commit step. If that call throws, the exception propagates out of `finalize()` and the caller receives an error, even though finalization itself already succeeded.
+- **Data integrity:** Safe. `maybeSampleForReview()`'s own writes (`QaReview` creation + the `QA_REVIEW` status flip) are wrapped in their own `$transaction([...])` and roll back independently — confirmed by direct experiment (forcing `qaReview.create` to throw with sampling forced to hit): no orphaned `QaReview` row, no partial write anywhere. The database is never left inconsistent.
+- **Risk:** The client may believe finalization failed and retry an operation that already succeeded — a misleading response, not a corruption risk.
+- **Not fixed because:** the available responses (swallow the exception, log-and-continue, return success with a warning, retry sampling, fold sampling into the main transaction, or introduce an explicit post-finalization state) are product/architecture decisions about the finalize operation's contract, not a defensive-coding fix — deliberately not chosen unilaterally, same discipline as the open-query business rule.
+- **Decision required:** define whether a sampling failure after a successful finalize should be surfaced to the caller, logged and continued past, retried, or represented as an explicit intermediate state.
+- **Reference:** [apps/api/src/modules/coding/coding.service.ts](../apps/api/src/modules/coding/coding.service.ts) `finalize()`, [apps/api/src/modules/qa/qa.service.ts](../apps/api/src/modules/qa/qa.service.ts) `maybeSampleForReview()`, and the regression test documenting current behavior in [coding.service.spec.ts](../apps/api/src/modules/coding/coding.service.spec.ts) (`"finalize — QA-sampling boundary (documented finding, not fixed)"`).
+
 ## Stabilization: P0 automated test coverage
 
 A deliberate shift from feature work to coverage — per the explicit call to lock in the matcher work above and make the existing intelligence hard to break before doing anything else. Target: every business-critical invariant has an automated test, not a coverage percentage.
