@@ -116,8 +116,8 @@ regression of the same bug.
 
 Eleven spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
 covering the modules whose bugs were the most subtle this project found, plus the P0
-data-integrity invariants, workflow state machines, and facility-isolation surface
-around the core coding write path:
+data-integrity invariants, workflow state machines, facility-isolation surface, and
+transaction atomicity around the core coding write path:
 
 - `src/modules/suggestions/suggestions.service.spec.ts` — COPD-with-exacerbation, the
   "specified"/"from" word-filter fixes, the "Erb's, disease" false-positive guard,
@@ -138,16 +138,29 @@ around the core coding write path:
   to anything.
 - `src/modules/coding/coding.service.spec.ts` — P0 data integrity for the single write
   path for coded diagnoses/procedures: invalid/non-billable code rejection, the
-  principal-diagnosis invariant (exactly one, enforced by a Zod `.refine`), POA
-  persistence, the audit trail's before/after snapshots, facility isolation, and the
-  finalize/QA_REVIEW state machine — including a genuine, previously-unknown bug this
-  suite caught while being written (see TEST_REPORT.md): `finalize()` could be called a
-  second time while an encounter sat in `QA_REVIEW`, silently overwriting the coding
-  decision an auditor was actively reviewing, because the guard only excluded
-  `FINALIZED`. This suite also caught its own flaky test: an assertion that finalize
-  always leaves status `FINALIZED` ignored that `QA_REVIEW` is an equally valid outcome
-  of the same call (QA sampling is randomized) — fixed to assert either, not by
-  suppressing the randomness.
+  principal-diagnosis invariant (exactly one, enforced by a Zod `.refine`), mismatched
+  `codeSystem` rejection, POA persistence and required-boolean validation, duplicate
+  diagnosis/procedure codes (pinned as current-accepted behavior, not asserted correct),
+  the audit trail's before/after snapshots, facility isolation, the finalize/QA_REVIEW
+  state machine, and transaction atomicity for both `saveDraft()` and `finalize()` —
+  including a genuine, previously-unknown bug this suite caught while being written (see
+  TEST_REPORT.md): `finalize()` could be called a second time while an encounter sat in
+  `QA_REVIEW`, silently overwriting the coding decision an auditor was actively
+  reviewing, because the guard only excluded `FINALIZED`. This suite also caught its own
+  flaky test: an assertion that finalize always leaves status `FINALIZED` ignored that
+  `QA_REVIEW` is an equally valid outcome of the same call (QA sampling is randomized) —
+  fixed to assert either, not by suppressing the randomness. The atomicity tests forced
+  each of `saveDraft()`'s and `finalize()`'s transactions to fail partway through (a
+  Prisma `$extends` query interceptor throwing on `auditEntry.create`) and confirmed no
+  partial write survives either — teeth-proofed by temporarily replacing the real
+  `$transaction(...)` wrapping with an equivalent non-transactional call and watching all
+  three tests fail with exactly the partial-write symptom they exist to catch. This
+  investigation also surfaced a real API-contract gap, documented rather than silently
+  fixed: `finalize()`'s post-commit call to `qaService.maybeSampleForReview()` isn't
+  wrapped in try/catch, so a sampling failure propagates to the caller as an error even
+  though the finalize itself already committed successfully — the database is never left
+  inconsistent (the sampling call's own transaction rolls back cleanly), but the caller
+  is told an operation failed that, in fact, already succeeded.
 - `src/modules/queries/queries.service.spec.ts` — the full CDI query state machine
   (`DRAFT → SENT → RESPONDED → RESOLVED`), documented from the actual implementation
   before any test was written (grepped every write site to confirm this is the only

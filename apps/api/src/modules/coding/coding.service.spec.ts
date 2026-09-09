@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { BadRequestException, ForbiddenException, NotFoundException } from "@nestjs/common";
 import { AppPrismaService } from "../../prisma/app-prisma.service.js";
 import { ReferencePrismaService } from "../../prisma/reference-prisma.service.js";
@@ -123,6 +123,17 @@ describe("CodingService", () => {
     });
   });
 
+  // No "automatic principal promotion after removing the principal" logic
+  // exists anywhere in CodingService or CodingDecisionSchema — confirmed by
+  // reading both end to end, not assumed. saveDraft() re-validates the
+  // exactly-one-principal invariant from scratch on every call; there is no
+  // repair/promotion step that picks a new principal from the remaining
+  // secondaries. The "zero principal diagnoses" test below IS that
+  // invariant's enforcement: removing the principal without designating a
+  // new one is rejected outright, not silently patched by promoting a
+  // secondary. Any promotion behavior is therefore entirely a frontend UX
+  // concern (if it exists there at all) — the backend has no state to keep
+  // consistent across a promotion because it never partially accepts one.
   describe("saveDraft — principal-diagnosis invariant", () => {
     it("rejects a decision with zero principal diagnoses", async () => {
       const encounterId = await seed();
@@ -242,6 +253,64 @@ describe("CodingService", () => {
       // (accepted) so a future change to add or remove that check is a
       // deliberate decision, not an accidental one.
       await expect(service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, dup)).resolves.toBeDefined();
+    });
+
+    it("current behavior: does not reject a duplicate procedure code (documented, not asserted as correct — same gap as diagnoses)", async () => {
+      const encounterId = await seed();
+      const pcs = await referencePrisma.icd10PcsCode.findFirstOrThrow({ where: { fiscalYear: 2026, isBillable: true } });
+      const dup = decision(encounterId, {
+        procedures: [
+          { code: pcs.code, codeSystem: "ICD-10-PCS", codeVersion: CODE_VERSION },
+          { code: pcs.code, codeSystem: "ICD-10-PCS", codeVersion: CODE_VERSION },
+        ],
+      });
+
+      await expect(service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, dup)).resolves.toBeDefined();
+    });
+
+    it("rejects a diagnosis submitted with codeSystem ICD-10-PCS (Zod literal mismatch — mixed codeSystem handling)", async () => {
+      const encounterId = await seed();
+      const bad = decision(encounterId, {
+        diagnoses: [{ code: "J189", codeSystem: "ICD-10-PCS", codeVersion: CODE_VERSION, role: "principal", presentOnAdmission: true }],
+      });
+
+      await expect(service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, bad)).rejects.toBeInstanceOf(
+        BadRequestException
+      );
+    });
+
+    it("rejects a procedure submitted with codeSystem ICD-10-CM (Zod literal mismatch — mixed codeSystem handling)", async () => {
+      const encounterId = await seed();
+      const pcs = await referencePrisma.icd10PcsCode.findFirstOrThrow({ where: { fiscalYear: 2026, isBillable: true } });
+      const bad = decision(encounterId, {
+        procedures: [{ code: pcs.code, codeSystem: "ICD-10-CM", codeVersion: CODE_VERSION }],
+      });
+
+      await expect(service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, bad)).rejects.toBeInstanceOf(
+        BadRequestException
+      );
+    });
+
+    it("rejects a diagnosis missing presentOnAdmission entirely (POA is required, not defaulted)", async () => {
+      const encounterId = await seed();
+      const bad = decision(encounterId, {
+        diagnoses: [{ code: "J189", codeSystem: "ICD-10-CM", codeVersion: CODE_VERSION, role: "principal" }],
+      });
+
+      await expect(service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, bad)).rejects.toBeInstanceOf(
+        BadRequestException
+      );
+    });
+
+    it("rejects a diagnosis with a non-boolean presentOnAdmission", async () => {
+      const encounterId = await seed();
+      const bad = decision(encounterId, {
+        diagnoses: [{ code: "J189", codeSystem: "ICD-10-CM", codeVersion: CODE_VERSION, role: "principal", presentOnAdmission: "yes" }],
+      });
+
+      await expect(service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, bad)).rejects.toBeInstanceOf(
+        BadRequestException
+      );
     });
 
     it("sets encounter status to IN_PROGRESS after a draft save", async () => {
@@ -467,6 +536,180 @@ describe("CodingService", () => {
       expect(encounterAfter.status).toBe(encounterBefore.status);
       expect(codingAfter.finalizedAt).toBe(codingBefore.finalizedAt);
       expect(codingAfter.updatedAt).toEqual(codingBefore.updatedAt);
+    });
+  });
+
+  describe("finalize — audit entry correctness", () => {
+    it("writes a FINALIZE audit entry with before=null and after matching the finalized diagnoses/procedures exactly", async () => {
+      const encounterId = await seed();
+      const saved = await service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, decision(encounterId));
+      await service.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID);
+
+      const entry = await appPrisma.auditEntry.findFirstOrThrow({
+        where: { codingDecisionId: saved.id, action: "FINALIZE" },
+      });
+      expect(entry.before).toBeNull();
+      expect(entry.after).toEqual({
+        diagnoses: [
+          { code: "J189", codeSystem: "ICD-10-CM", codeVersion: CODE_VERSION, role: "principal", presentOnAdmission: true },
+        ],
+        procedures: [],
+      });
+    });
+  });
+
+  /**
+   * Answers the question this phase was explicitly scoped around: "can a
+   * permitted mutation leave the database in a partially corrupted state if
+   * something inside the operation fails?" Rather than assume the existing
+   * `$transaction(async (tx) => {...})` wrapping is atomic, this forces a
+   * real failure partway through each transaction (via a Prisma `$extends`
+   * query interceptor that throws on a specific model call — verified first
+   * as a standalone experiment) and asserts nothing partial was written.
+   * `auditEntry.create` is the interception point for both: it's the last
+   * write before the closing `encounter.update` in each transaction, so a
+   * successful rollback here proves the *whole* transaction is atomic, not
+   * just the two writes before the interception point.
+   */
+  describe("saveDraft — transaction atomicity", () => {
+    function poisonedService(): CodingService {
+      const poisoned = appPrisma.$extends({
+        query: {
+          auditEntry: {
+            async create() {
+              throw new Error("SIMULATED_FAILURE");
+            },
+          },
+        },
+      });
+      return new CodingService(poisoned as unknown as AppPrismaService, referencePrisma, grouper, qa);
+    }
+
+    it("leaves no coding decision and no status change when the transaction fails on first save", async () => {
+      const encounterId = await seed();
+
+      await expect(
+        poisonedService().saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, decision(encounterId))
+      ).rejects.toThrow("SIMULATED_FAILURE");
+
+      const coding = await appPrisma.codingDecision.findUnique({ where: { encounterId } });
+      const encounter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(coding).toBeNull();
+      expect(encounter.status).toBe("NEW");
+    });
+
+    it("leaves the existing coding decision and status completely unchanged when the transaction fails on an update", async () => {
+      const encounterId = await seed();
+      await service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, decision(encounterId));
+      const before = await appPrisma.codingDecision.findUniqueOrThrow({ where: { encounterId } });
+
+      const changed = decision(encounterId, {
+        diagnoses: [{ code: "N179", codeSystem: "ICD-10-CM", codeVersion: CODE_VERSION, role: "principal", presentOnAdmission: true }],
+      });
+      await expect(
+        poisonedService().saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, changed)
+      ).rejects.toThrow("SIMULATED_FAILURE");
+
+      const after = await appPrisma.codingDecision.findUniqueOrThrow({ where: { encounterId } });
+      const encounter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      expect(after.diagnoses).toEqual(before.diagnoses);
+      expect(after.updatedAt).toEqual(before.updatedAt);
+      expect(encounter.status).toBe("IN_PROGRESS"); // set by the successful first save, not touched by the failed second one
+    });
+  });
+
+  describe("finalize — transaction atomicity", () => {
+    it("leaves finalizedAt/msDrg/status/audit trail completely untouched when the transaction fails", async () => {
+      const encounterId = await seed();
+      await service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, decision(encounterId));
+      const codingBefore = await appPrisma.codingDecision.findUniqueOrThrow({ where: { encounterId } });
+      const encounterBefore = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+
+      const poisoned = appPrisma.$extends({
+        query: {
+          auditEntry: {
+            async create() {
+              throw new Error("SIMULATED_FAILURE");
+            },
+          },
+        },
+      });
+      const poisonedService = new CodingService(poisoned as unknown as AppPrismaService, referencePrisma, grouper, qa);
+
+      await expect(poisonedService.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID)).rejects.toThrow(
+        "SIMULATED_FAILURE"
+      );
+
+      const codingAfter = await appPrisma.codingDecision.findUniqueOrThrow({ where: { encounterId } });
+      const encounterAfter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      const auditEntries = await appPrisma.auditEntry.findMany({ where: { codingDecisionId: codingBefore.id } });
+      const qaReviews = await appPrisma.qaReview.findMany({ where: { encounterId } });
+
+      expect(codingAfter.finalizedAt).toBe(codingBefore.finalizedAt);
+      expect(codingAfter.msDrg).toBe(codingBefore.msDrg);
+      expect(codingAfter.updatedAt).toEqual(codingBefore.updatedAt);
+      expect(encounterAfter.status).toBe(encounterBefore.status);
+      // Only the CREATE_DRAFT entry from the seed save above — no FINALIZE
+      // entry, and QA sampling (which only runs after finalize's own
+      // transaction commits) never ran at all.
+      expect(auditEntries.map((e) => e.action)).toEqual(["CREATE_DRAFT"]);
+      expect(qaReviews).toHaveLength(0);
+    });
+  });
+
+  /**
+   * A genuine finding from the atomicity investigation, reported rather than
+   * silently fixed (same discipline as the open-query business rule): unlike
+   * the two transactions above, `finalize()`'s call to
+   * `qaService.maybeSampleForReview()` runs AFTER the main transaction has
+   * already committed, and isn't wrapped in try/catch. Direct experiment
+   * confirmed: if that call throws (its own internal 2-write
+   * `$transaction([...])` still rolls back correctly — no orphaned
+   * `QaReview` row is left behind), the exception propagates out of
+   * `finalize()` to the caller as a failure, EVEN THOUGH the finalize itself
+   * (coding decision's finalizedAt/msDrg, encounter status, and the
+   * FINALIZE audit entry) already committed successfully and is not rolled
+   * back. The database is never left inconsistent — but the caller receives
+   * an error response describing an operation that, in fact, already
+   * succeeded. This is a real gap, not a corruption risk: whether finalize()
+   * should catch/log a sampling failure instead of surfacing it as the
+   * request's own failure is a product decision (does the client need to
+   * know sampling didn't run?), not something to silently pick here.
+   */
+  describe("finalize — QA-sampling boundary (documented finding, not fixed)", () => {
+    it("current behavior: a QA-sampling failure after a successful finalize still propagates to the caller as an error", async () => {
+      const encounterId = await seed();
+      await service.saveDraft(encounterId, TEST_USER_ID, TEST_FACILITY_ID, decision(encounterId));
+
+      const poisonedQaPrisma = appPrisma.$extends({
+        query: {
+          qaReview: {
+            async create() {
+              throw new Error("SIMULATED_QA_SAMPLING_FAILURE");
+            },
+          },
+        },
+      });
+      const poisonedQa = new QaService(poisonedQaPrisma as unknown as AppPrismaService);
+      const serviceWithPoisonedQa = new CodingService(appPrisma, referencePrisma, grouper, poisonedQa);
+
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0); // force sampling to hit
+      try {
+        await expect(serviceWithPoisonedQa.finalize(encounterId, TEST_USER_ID, TEST_FACILITY_ID)).rejects.toThrow(
+          "SIMULATED_QA_SAMPLING_FAILURE"
+        );
+      } finally {
+        randomSpy.mockRestore();
+      }
+
+      // ...despite the thrown error, the finalize itself genuinely
+      // succeeded and is not rolled back:
+      const coding = await appPrisma.codingDecision.findUniqueOrThrow({ where: { encounterId } });
+      const encounter = await appPrisma.encounter.findUniqueOrThrow({ where: { id: encounterId } });
+      const qaReviews = await appPrisma.qaReview.findMany({ where: { encounterId } });
+      expect(coding.finalizedAt).not.toBeNull();
+      expect(encounter.status).toBe("FINALIZED");
+      expect(qaReviews).toHaveLength(0); // sampling's own transaction rolled back correctly
     });
   });
 });
