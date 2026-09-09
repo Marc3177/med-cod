@@ -1,0 +1,86 @@
+import type { GoldCase } from "../types.js";
+
+/** Common inpatient abbreviations that must be expanded via the curated
+ *  ClinicalAlias table before matching runs (TerminologyService). */
+export const abbreviationsCases: GoldCase[] = [
+  {
+    id: "abbr-01",
+    category: "abbreviations",
+    documents: ["Patient has COPD with acute exacerbation, on home oxygen."],
+    expectedMatches: [{ code: "J441", codeSystem: "ICD-10-CM" }],
+    expectedNonMatches: [],
+    reason: "COPD -> chronic obstructive pulmonary disease expansion.",
+  },
+  {
+    id: "abbr-02",
+    category: "abbreviations",
+    documents: ["Ultrasound confirms DVT of the right lower extremity."],
+    expectedMatches: [{ code: "I82401", codeSystem: "ICD-10-CM" }],
+    expectedNonMatches: [],
+    reason: "DVT -> deep vein thrombosis expansion.",
+  },
+  {
+    id: "abbr-03",
+    category: "abbreviations",
+    documents: ["HTN, well managed on lisinopril and amlodipine."],
+    expectedMatches: [{ code: "I10", codeSystem: "ICD-10-CM" }],
+    expectedNonMatches: [],
+    reason: "HTN -> hypertension expansion.",
+  },
+  {
+    id: "abbr-04",
+    category: "abbreviations",
+    documents: ["Labs consistent with AKI, creatinine rising from baseline."],
+    expectedMatches: [{ code: "N179", codeSystem: "ICD-10-CM" }],
+    expectedNonMatches: [],
+    reason: "AKI -> acute kidney injury expansion.",
+  },
+  {
+    id: "abbr-05",
+    category: "abbreviations",
+    documents: ["Patient has known CKD, stage 3, followed by nephrology."],
+    expectedMatches: [{ code: "N1830", codeSystem: "ICD-10-CM" }],
+    expectedNonMatches: [],
+    reason: "CKD -> chronic kidney disease expansion, combined with staging (also see numeric_qualifiers_staging).",
+  },
+  {
+    id: "abbr-06",
+    category: "abbreviations",
+    documents: ["Urinalysis positive, consistent with UTI, started on ceftriaxone."],
+    expectedMatches: [{ code: "N390", codeSystem: "ICD-10-CM" }],
+    expectedNonMatches: [],
+    reason: "UTI -> urinary tract infection expansion.",
+  },
+  {
+    id: "abbr-07",
+    category: "abbreviations",
+    documents: ["CT chest confirms acute PE in the right lower lobe."],
+    expectedMatches: [{ code: "I2699", codeSystem: "ICD-10-CM" }],
+    expectedNonMatches: [],
+    reason: "PE -> pulmonary embolism expansion.",
+  },
+  {
+    id: "abbr-08",
+    category: "abbreviations",
+    documents: ["History of CVA two years ago, no residual deficits."],
+    expectedMatches: [{ code: "Z8673", codeSystem: "ICD-10-CM" }],
+    expectedNonMatches: [],
+    reason: "CVA -> cerebrovascular accident expansion, combined with 'history of' (also see temporal_context).",
+  },
+  {
+    id: "abbr-09",
+    category: "abbreviations",
+    documents: ["Patient had a TIA last month, fully resolved."],
+    expectedMatches: [{ code: "Z8673", codeSystem: "ICD-10-CM" }],
+    expectedNonMatches: [],
+    reason: "TIA -> transient ischemic attack expansion.",
+  },
+  {
+    id: "abbr-10",
+    category: "abbreviations",
+    documents: ["Patient with acute MI, taken emergently for cardiac catheterization."],
+    expectedMatches: [{ code: "I219", codeSystem: "ICD-10-CM" }],
+    expectedNonMatches: [],
+    reason: "MI -> myocardial infarction expansion; still depends on the un-shipped infarct/infarction cluster (see synonyms_morphology syn-08) — expected to currently FAIL for the same reason even though the abbreviation itself expands correctly.",
+  },
+];

@@ -7,6 +7,7 @@
     "build": "nest build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "evaluate": "vitest run --config vitest.evaluate.config.ts",
     "prisma:app:generate": "prisma generate --schema=prisma/app/schema.prisma",
     "prisma:reference:generate": "prisma generate --schema=prisma/reference/schema.prisma",
     "prisma:app:migrate": "prisma migrate dev --schema=prisma/app/schema.prisma",

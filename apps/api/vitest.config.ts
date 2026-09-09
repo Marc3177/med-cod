@@ -11,5 +11,12 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     testTimeout: 20000,
+    // The P1-E0 evaluation harness (src/evaluation) measures matching
+    // QUALITY (recall/precision against a gold-annotated adversarial set),
+    // not CORRECTNESS — it's deliberately not part of the `npm test` merge
+    // gate. Run it explicitly via `npm run evaluate`, which passes it as an
+    // explicit path and so is unaffected by this exclude. See
+    // docs/EVALUATION_HARNESS.md.
+    exclude: ["**/node_modules/**", "**/dist/**", "src/evaluation/**"],
   },
 });
