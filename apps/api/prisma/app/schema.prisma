@@ -1,0 +1,219 @@
+// Application (transactional) database — coding_app
+// Connect via DATABASE_URL. See docs/ARCHITECTURE.md for the two-database rationale.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../../node_modules/.prisma/app-client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Facility {
+  id        Int        @id @default(autoincrement())
+  name      String
+  createdAt DateTime   @default(now())
+  encounters Encounter[]
+  users      User[]
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  email        String   @unique
+  passwordHash String
+  role         Role
+  facilityId   Int
+  facility     Facility @relation(fields: [facilityId], references: [id])
+  createdAt    DateTime @default(now())
+}
+
+enum Role {
+  CODER
+  ADMIN
+  PROVIDER
+  AUDITOR
+  SUPERVISOR
+}
+
+model Patient {
+  id          Int         @id @default(autoincrement())
+  mrn         String      @unique
+  dateOfBirth DateTime
+  sex         String
+  encounters  Encounter[]
+}
+
+model Encounter {
+  id                Int       @id @default(autoincrement())
+  patientId         Int
+  patient           Patient   @relation(fields: [patientId], references: [id])
+  facilityId        Int
+  facility          Facility  @relation(fields: [facilityId], references: [id])
+  admissionDate     DateTime
+  dischargeDate     DateTime?
+  admittingDiagnosis String?
+  dischargeDisposition String?
+  status            EncounterStatus @default(NEW)
+  documents         ClinicalDocument[]
+  codingDecision    CodingDecision?
+  queries           Query[]
+  qaReviews         QaReview[]
+  views             EncounterView[]
+  rejectedSuggestions RejectedSuggestion[]
+}
+
+enum EncounterStatus {
+  NEW
+  IN_PROGRESS
+  QUERY_PENDING
+  QA_REVIEW
+  FINALIZED
+}
+
+model ClinicalDocument {
+  id          Int       @id @default(autoincrement())
+  encounterId Int
+  encounter   Encounter @relation(fields: [encounterId], references: [id])
+  type        String
+  content     String
+  createdAt   DateTime  @default(now())
+}
+
+model CodingDecision {
+  id            Int       @id @default(autoincrement())
+  encounterId   Int       @unique
+  encounter     Encounter @relation(fields: [encounterId], references: [id])
+  diagnoses     Json
+  procedures    Json
+  msDrg         String?
+  msDrgDescription String?
+  finalizedAt   DateTime?
+  finalizedById Int?
+  updatedAt     DateTime  @updatedAt
+  auditEntries  AuditEntry[]
+}
+
+model AuditEntry {
+  id               Int            @id @default(autoincrement())
+  codingDecisionId Int
+  codingDecision   CodingDecision @relation(fields: [codingDecisionId], references: [id])
+  userId           Int
+  action           String
+  before           Json?
+  after            Json?
+  reason           String?
+  createdAt        DateTime       @default(now())
+}
+
+// The CDI/coding query workflow: DRAFT -> SENT (encounter moves to
+// QUERY_PENDING) -> RESPONDED (provider answered) -> RESOLVED (coder has
+// reviewed the response and, if needed, updated coding — encounter returns
+// to IN_PROGRESS). EXPIRED is a state for a provider who never responds;
+// nothing currently transitions a query there automatically (no expiry job
+// exists yet) — it exists in the schema so the status field doesn't need a
+// migration when that's added later.
+model Query {
+  id                 Int         @id @default(autoincrement())
+  encounterId        Int
+  encounter          Encounter   @relation(fields: [encounterId], references: [id])
+  createdById        Int
+  question           String
+  clinicalIndicators String?
+  // Optional link to the specific candidate code this query is about — set
+  // when a query is raised from a Suggestion (a real candidate code exists
+  // to link to). Deliberately NOT set when raised from a Documentation Gap:
+  // a gap has no code by design (see DocumentationGap's "potential query ≠
+  // diagnosis" contract), and a query about a gap isn't about any specific
+  // candidate code yet, so linking one here would quietly reintroduce that
+  // exact thing this project has been careful to avoid.
+  relatedCode        String?
+  relatedCodeSystem  String?
+  status             QueryStatus @default(DRAFT)
+  sentAt             DateTime?
+  response           String?
+  respondedAt        DateTime?
+  respondedById      Int?
+  resolvedAt         DateTime?
+  resolvedById       Int?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+}
+
+enum QueryStatus {
+  DRAFT
+  SENT
+  RESPONDED
+  RESOLVED
+  EXPIRED
+}
+
+// Post-finalization QA sampling: a finalized encounter is randomly flagged
+// (see QaReviewService.SAMPLING_RATE) for an auditor to check. APPROVED
+// leaves the encounter finalized; RETURNED reopens it to IN_PROGRESS with a
+// required reason, so the coder can recode and re-finalize (which can be
+// sampled again — there's no cap on how many times an encounter can cycle
+// through this).
+model QaReview {
+  id            Int            @id @default(autoincrement())
+  encounterId   Int
+  encounter     Encounter      @relation(fields: [encounterId], references: [id])
+  status        QaReviewStatus @default(PENDING)
+  reason        String?
+  reviewedById  Int?
+  reviewedAt    DateTime?
+  createdAt     DateTime       @default(now())
+}
+
+enum QaReviewStatus {
+  PENDING
+  APPROVED
+  RETURNED
+}
+
+// A coder's decision that a suggested code should NOT be offered again for
+// this encounter — one of the four outcomes a suggestion can reach (Accept
+// adds the code directly to CodingDecision; Query creates a real Query row;
+// Modify just re-focuses the search box, nothing to persist; Reject is the
+// only outcome with no other natural home, hence this table). Scoped to the
+// encounter, not the user — like the coding decision itself, this is a fact
+// about the chart, not a personal preference, so any coder who reopens it
+// sees the same rejected suggestions filtered out.
+model RejectedSuggestion {
+  id          Int       @id @default(autoincrement())
+  encounterId Int
+  encounter   Encounter @relation(fields: [encounterId], references: [id])
+  code        String
+  codeSystem  String
+  rejectedById Int
+  createdAt   DateTime  @default(now())
+
+  @@unique([encounterId, code, codeSystem])
+}
+
+// Tracks the last time each user viewed each encounter, so the app can show
+// "what's changed since you last looked at this chart" (new documents,
+// coding edited by someone else, a query response, a QA return). Viewing
+// the encounter detail page updates this row to now — there is no separate
+// "mark as read" step.
+model EncounterView {
+  id          Int       @id @default(autoincrement())
+  encounterId Int
+  encounter   Encounter @relation(fields: [encounterId], references: [id])
+  userId      Int
+  viewedAt    DateTime  @default(now())
+
+  @@unique([encounterId, userId])
+}
+
+model BulkImportJob {
+  id          Int      @id @default(autoincrement())
+  targetTable String
+  fileName    String
+  status      String   @default("PENDING") // PENDING -> VALIDATING -> STAGED -> APPLIED / FAILED
+  rowCount    Int?
+  errorReport Json?
+  createdAt   DateTime @default(now())
+  appliedAt   DateTime?
+}

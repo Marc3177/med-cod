@@ -1,0 +1,170 @@
+// Reference (CMS code set) database — coding_reference
+// Connect via REFERENCE_DATABASE_URL. Bulk-loaded/rebuilt from CMS source files.
+// Every row is effective-dated: a code valid for FY2025 may not exist, or may
+// mean something different, in FY2027 — never mutate a row in place, add a new one.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../../node_modules/.prisma/reference-client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("REFERENCE_DATABASE_URL")
+}
+
+// A curated, hand-picked set of lab-value indicators that commonly justify
+// a documentation query — "elevated creatinine documented, but no kidney
+// diagnosis coded" is a real, everyday CDI/coding trigger. Deliberately
+// small and explicit (not ML-derived): each row is a clinical fact a human
+// reviewed, same curation discipline as DrgFamily/CcMccFlag. This produces
+// QUERY suggestions only, never a diagnosis code — see
+// DocumentationGapsService for why that boundary is enforced in code, not
+// just convention.
+model ClinicalIndicator {
+  id                Int      @id @default(autoincrement())
+  name              String
+  keyword           String
+  direction         String // "above" | "below"
+  threshold         Float
+  unit              String?
+  relatedDxPrefixes String[]
+  queryTemplate     String // "{value}" is replaced with the extracted number
+}
+
+// A curated clinical-abbreviation alias table — the "COPD returns zero
+// results" gap found during end-to-end testing (docs/TEST_REPORT.md).
+// Neither the code descriptions nor the Alphabetic Index use abbreviations
+// like "COPD" or "MI" — only the spelled-out clinical term. This table is
+// consulted before the existing index-based search to expand an
+// abbreviation into the term the index actually contains, rather than
+// replacing or duplicating that search logic. Not exhaustive — covers
+// common inpatient-relevant abbreviations, versioned like everything else
+// in this database (versioning here just means "add a new row", there's no
+// fiscal-year concept for abbreviations).
+model ClinicalAlias {
+  id        Int    @id @default(autoincrement())
+  alias     String @unique
+  expansion String
+}
+
+model Icd10CmCode {
+  id               Int       @id @default(autoincrement())
+  code             String
+  shortDescription String
+  longDescription  String
+  isBillable       Boolean
+  fiscalYear       Int
+  effectiveFrom    DateTime
+  effectiveTo      DateTime?
+
+  @@unique([code, fiscalYear])
+  @@index([code])
+}
+
+model Icd10PcsCode {
+  id               Int       @id @default(autoincrement())
+  code             String
+  description      String
+  isBillable       Boolean
+  fiscalYear       Int
+  effectiveFrom    DateTime
+  effectiveTo      DateTime?
+
+  @@unique([code, fiscalYear])
+  @@index([code])
+}
+
+// The Alphabetic Index (CM) / Index (PCS) — the official CMS/NCHS reference
+// that maps clinical terms and synonyms to codes. This exists because code
+// descriptions themselves use formal nomenclature that rarely matches how a
+// physician actually writes a note (e.g. "bronchoscopy" never appears in any
+// ICD-10-PCS code description — the index is the only authoritative bridge).
+//
+// matchType 'code': codeValue is one complete, billable code — a direct hit.
+// matchType 'prefix': codeValue is a partial code (a PCS table stub, e.g.
+// "0B9") — the index points at a table/category, not a single code; resolve
+// by matching Icd10CmCode/Icd10PcsCode rows whose code starts with this prefix.
+model SynonymIndexEntry {
+  id            Int      @id @default(autoincrement())
+  codeSystem    String
+  term          String
+  matchType     String
+  codeValue     String
+  fiscalYear    Int
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+
+  @@index([term])
+  @@index([codeSystem, fiscalYear])
+}
+
+// A deliberately SIMPLIFIED, hand-curated approximation of MS-DRG grouping —
+// not the real CMS grouper (see docs/REQUIREMENTS.md open questions: the
+// real grouper is a separate integration project, deferred past this MVP).
+// Each family covers one clinical condition group and its three CMS-style
+// severity tiers (MCC / CC / none). dxPrefixes matches by ICD-10-CM code
+// prefix (e.g. "J18" covers J180-J189) against the principal diagnosis only.
+model DrgFamily {
+  id                 Int      @id @default(autoincrement())
+  name               String
+  mdc                String
+  dxPrefixes         String[]
+  mccDrg             String
+  mccDescription     String
+  ccDrg              String
+  ccDescription      String
+  noCcMccDrg         String
+  noCcMccDescription String
+}
+
+// The surgical counterpart to DrgFamily: within a given MDC, a significant
+// OR procedure overrides the medical-family DRG regardless of diagnosis
+// severity — this is real MS-DRG structure (every MDC splits into a
+// surgical and a medical partition), simplified here to match by PCS code
+// prefix (body system) rather than the official per-procedure OR/non-OR
+// designation list. See grouper.service.ts for which root operations are
+// treated as "counts as OR" in this simplified model.
+model SurgicalDrgFamily {
+  id                 Int      @id @default(autoincrement())
+  name               String
+  mdc                String
+  pcsPrefixes        String[]
+  mccDrg             String
+  mccDescription     String
+  ccDrg              String
+  ccDescription      String
+  noCcMccDrg         String
+  noCcMccDescription String
+}
+
+// A hand-curated subset of the CMS CC/MCC list — which secondary diagnoses
+// count as a complication/comorbidity (CC) or major CC (MCC) for severity
+// tiering. The real CMS list has thousands of entries; this covers the
+// codes relevant to this MVP's seed data and common conditions, and is
+// explicitly not a complete or authoritative CC/MCC list.
+model CcMccFlag {
+  id       Int    @id @default(autoincrement())
+  code     String @unique
+  severity String
+}
+
+model MsDrgWeight {
+  id            Int      @id @default(autoincrement())
+  drg           String
+  description   String
+  relativeWeight Float
+  fiscalYear    Int
+
+  @@unique([drg, fiscalYear])
+}
+
+model NcciEdit {
+  id            Int      @id @default(autoincrement())
+  column1Code   String
+  column2Code   String
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+
+  @@index([column1Code, column2Code])
+}
