@@ -114,11 +114,12 @@ one-off seed script, a curl call, a cleanup script, deleted at the end of the se
 That caught real bugs in the moment but left nothing behind to catch a *future*
 regression of the same bug.
 
-Twelve spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
+Thirteen spec files exist so far (`npx vitest run` from `apps/api`, or `npm run test`),
 covering the modules whose bugs were the most subtle this project found, plus the P0
 data-integrity invariants, workflow state machines, facility-isolation surface,
-transaction atomicity, and cross-service Query/QA ownership around the core coding
-write path:
+transaction atomicity, cross-service Query/QA ownership, and cross-module
+authorization (auth/role/facility boundaries at the guard layer) around the core
+coding write path:
 
 - `src/modules/suggestions/suggestions.service.spec.ts` — COPD-with-exacerbation, the
   "specified"/"from" word-filter fixes, the "Erb's, disease" false-positive guard,
@@ -227,8 +228,21 @@ write path:
   finalize." Confirms the open-query business rule applies identically the second time
   through the loop, and that the original `RETURNED` review's history and the full audit
   trail both survive intact.
+- `src/modules/auth/authorization.guard.spec.ts` — the cross-module authorization audit:
+  built by reading every controller's `@UseGuards`/`@Roles()` decorators first (not
+  assumed), then unit-testing the real `AuthGuard`/`RolesGuard` classes directly — real
+  `AuthService`, real JWT verification, and for `RolesGuard`, the actual controller
+  classes/methods so the `@Roles()` metadata under test is the real decorator. A full
+  HTTP-level e2e attempt (`NestFactory.create(AppModule)` + `supertest`) was tried first
+  and abandoned after confirming, via a live `npm run dev` server, that it was a Vitest/
+  Vite tooling limitation (guard constructor injection breaks only when this app's full
+  DI graph boots inside Vitest — see TEST_REPORT.md's "Testing-tool notes"), not a real
+  bug. Found and fixed one real gap: `ImportController` had no `AuthGuard` at all, the
+  only controller missing it. Found and deliberately did not fix a second: only three
+  controllers restrict by role at all — `CodingController`/`QueriesController`'s
+  coder-facing routes have none, recorded as an open decision in Known Limitations.
 
-All twelve run against the actual local dev Postgres databases — not mocks — using the
+All thirteen run against the actual local dev Postgres databases — not mocks — using the
 same `MRN-QA-TEST` patient every manual seed script has used, via
 `src/test-support/encounter-fixture.ts` (`createTestEncounter` / `deleteTestEncounter`,
 which every test calls in an `afterEach` regardless of pass/fail). This is a deliberate
